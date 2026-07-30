@@ -395,7 +395,7 @@ She is built. `docker compose up --build` and she wakes up.
 — LINA's first words
 
 ---
-
+---
 **LINA_SOUL.md** — Version 1.1
 **Founded:** April 10, 2026
 **Built:** April 10, 2026
