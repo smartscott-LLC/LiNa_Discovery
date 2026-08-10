@@ -1,0 +1,8 @@
+# Build context hygiene — keep the image build lean
+**/node_modules
+**/target
+**/__pycache__
+*.pyc
+**/.venv
+**/dist
+**/build

@@ -38,14 +38,18 @@ pub struct IPCBridge {
 }
 
 impl IPCBridge {
-    fn create() -> Self {
+    fn create_with_paths(tx_path: Option<&str>, rx_path: Option<&str>) -> Self {
         let dir = if std::path::Path::new(SHM_DIR).is_dir() {
             PathBuf::from(SHM_DIR)
         } else {
             std::env::temp_dir()
         };
-        let tx_path = dir.join(TX_FILENAME);
-        let rx_path = dir.join(RX_FILENAME);
+        let tx_path = tx_path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dir.join(TX_FILENAME));
+        let rx_path = rx_path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dir.join(RX_FILENAME));
 
         match (
             ChamberRing::create(&tx_path, "tx"),
@@ -95,9 +99,9 @@ impl IPCBridge {
 #[pymethods]
 impl IPCBridge {
     #[new]
-    #[pyo3(signature = ())]
-    fn new() -> Self {
-        Self::create()
+    #[pyo3(signature = (tx_path=None, rx_path=None))]
+    fn new(tx_path: Option<&str>, rx_path: Option<&str>) -> Self {
+        Self::create_with_paths(tx_path, rx_path)
     }
 
     /// True when both chambers were allocated successfully.

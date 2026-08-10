@@ -75,22 +75,18 @@ def test_full_loop_binary():
 # chat() integration — with and without a responsive Triton
 # ---------------------------------------------------------------------------
 
-class FakeMessages:
-    def __init__(self, delay=0.4):
+class FakeVoice:
+    """A provider-agnostic fake: LINA's voice contract is `generate()`."""
+    def __init__(self, delay=0.4, fail=False):
         self.delay = delay
         self.calls = 0
-    async def create(self, **kwargs):
+        self.fail = fail
+    async def generate(self, system, messages, **kwargs):
         self.calls += 1
+        if self.fail:
+            raise RuntimeError("all instruments broken")
         await asyncio.sleep(self.delay)
-        class Content:
-            text = "That is a fair way to see it, and I want to understand it better."
-        class Resp:
-            content = [Content()]
-        return Resp()
-
-class FakeAI:
-    def __init__(self, delay=0.4):
-        self.messages = FakeMessages(delay)
+        return "That is a fair way to see it, and I want to understand it better."
 
 class FakeDB:
     async def fetchrow(self, query, *args):
@@ -155,7 +151,8 @@ def test_chat_with_responsive_triton():
     try:
         time.sleep(0.8)  # triton attaches (files may not exist yet — retries)
         cache = FakeCache()
-        core = LINACore(FakeDB(), cache, FakeAI(delay=0.4))
+        voice = FakeVoice(delay=0.4)
+        core = LINACore(FakeDB(), cache, voice)
         assert core.ipc is not None and core.ipc.available()
 
         resp = run_chat(core, "Please help me think through this carefully together.")
@@ -165,6 +162,7 @@ def test_chat_with_responsive_triton():
         assert any("foresight" in content for _, content in cache.appended), (
             "foresight note must be stored for the next turn"
         )
+        assert voice.calls == 1, "voice must be called exactly once"
         results.append(("chat + responsive triton", f"OK (foresight merged, {resp.evaluation['alignment_score']:.2f} aligned)"))
     finally:
         proc.terminate()
@@ -175,7 +173,7 @@ def test_chat_without_triton():
     import lina_service
     from lina_service import LINACore
 
-    core = LINACore(FakeDB(), FakeCache(), FakeAI(delay=0.1))
+    core = LINACore(FakeDB(), FakeCache(), FakeVoice(delay=0.1))
     # Bridge exists but nobody consumes — must time out and continue.
     start = time.monotonic()
     resp = run_chat(core, "Hello, are you there?")
@@ -189,28 +187,57 @@ def test_chat_without_triton():
         results.append(("tx queue retained", "OK"))
 
 
+def test_chat_voice_failure_degrades_to_503():
+    import lina_service
+    from lina_service import LINACore, ChatRequest
+    from fastapi import HTTPException
+    from providers import VoicePool, VoicePoolError
+
+    # A pool whose only provider fails → VoicePoolError → 503, no crash.
+    class BrokenProvider:
+        name = "broken"
+        label = "broken"
+        async def generate(self, system, messages, **kwargs):
+            raise RuntimeError("boom")
+        async def aclose(self):
+            pass
+
+    pool = VoicePool([BrokenProvider()])
+    core = LINACore(FakeDB(), FakeCache(), pool)
+    req = ChatRequest(user_id="u1", session_id="s1", message="test")
+    try:
+        asyncio.run(core.chat(req))
+        raise AssertionError("expected 503")
+    except HTTPException as e:
+        assert e.status_code == 503
+        assert "no voice" in e.detail
+    results.append(("chat + voice failure", "OK (503, graceful)"))
+
+
 def test_chat_without_bridge():
     import lina_service
     from lina_service import LINACore
 
     lina_service.ipc_bridge = type("X", (), {"IPCBridge": lambda: (_ for _ in ()).throw(RuntimeError("no shm"))})
-    core = LINACore(FakeDB(), FakeCache(), FakeAI(delay=0.1))
+    core = LINACore(FakeDB(), FakeCache(), FakeVoice(delay=0.1))
     assert core.ipc is None
     resp = run_chat(core, "Bridge is gone — still alive?")
     assert resp.evaluation["is_aligned"] in (True, False)
     results.append(("chat + no bridge", "OK (graceful fallback)"))
 
 
-check("full loop (bridge ⇄ triton)", test_full_loop_binary)
-check("chat + responsive triton", test_chat_with_responsive_triton)
-check("chat + no triton (timeout)", test_chat_without_triton)
-check("chat + no bridge (fallback)", test_chat_without_bridge)
+if __name__ == "__main__":
+    check("full loop (bridge ⇄ triton)", test_full_loop_binary)
+    check("chat + responsive triton", test_chat_with_responsive_triton)
+    check("chat + no triton (timeout)", test_chat_without_triton)
+    check("chat + voice failure (503)", test_chat_voice_failure_degrades_to_503)
+    check("chat + no bridge (fallback)", test_chat_without_bridge)
 
-print("=" * 60)
-ok = True
-for name, status in results:
-    print(f"[{status}] {name}")
-    if not status.startswith("OK"):
-        ok = False
-print("=" * 60)
-print("ALL FULL-LOOP TESTS PASS" if ok else "FAILURES PRESENT")
+    print("=" * 60)
+    ok = True
+    for name, status in results:
+        print(f"[{status}] {name}")
+        if not status.startswith("OK"):
+            ok = False
+    print("=" * 60)
+    print("ALL FULL-LOOP TESTS PASS" if ok else "FAILURES PRESENT")

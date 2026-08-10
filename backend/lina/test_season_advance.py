@@ -93,26 +93,31 @@ def make_core(db):
     return core
 
 
-async def main():
-    results = []
-
-    # --- Path 1: Winter is final ---
+async def path_winter_final():
     db = FakeDB(winter=True)
     core = make_core(db)
     r = await core.advance_season_if_ready("w")
     assert r["advanced"] is False and "final season" in r["reasons"][0]
     assert db.transactions == 0 and not db.executed, "winter must not write"
-    results.append(("winter-final", "OK", r["reasons"][0]))
 
-    # --- Path 2: Not ready (too few sessions/evaluations) ---
+
+def test_winter_final():
+    asyncio.run(path_winter_final())
+
+
+async def path_not_ready():
     db = FakeDB(season="spring", sessions=3, evals=18, aligned=17, identity_memories=0)
     core = make_core(db)
     r = await core.advance_season_if_ready("s")
     assert r["advanced"] is False and len(r["reasons"]) >= 3, r["reasons"]
     assert db.transactions == 0 and not db.executed, "not-ready must not write"
-    results.append(("not-ready", "OK", f"{len(r['reasons'])} reasons"))
 
-    # --- Path 3: Ready (spring -> summer) ---
+
+def test_not_ready():
+    asyncio.run(path_not_ready())
+
+
+async def path_ready_advance():
     db = FakeDB(season="spring", sessions=10, evals=60, aligned=54, identity_memories=3)
     core = make_core(db)
     r = await core.advance_season_if_ready("r", session_number=11)
@@ -129,40 +134,55 @@ async def main():
     assert db.transactions == 1
     # engine cache invalidated: re-requesting the engine rebuilds (no crash)
     assert core._engines == {}, "cache must be invalidated"
-    results.append(("ready-advance", "OK", f"spring -> {r['season']}, bounds before/after recorded"))
 
-    # --- Path 4: Concurrent advance guard (locked row already advanced) ---
+
+def test_ready_advance():
+    asyncio.run(path_ready_advance())
+
+
+async def path_already_advanced():
     db = FakeDB(season="spring", sessions=10, evals=60, aligned=54, identity_memories=3)
     core = make_core(db)
-    calls = {"n": 0}
     orig_fetchrow = db.fetchrow
     async def fetchrow_after_advance(query, *args):
         if "FOR UPDATE" in query:
-            calls["n"] += 1
             return {"current_season": "summer"}  # another request already advanced
         return await orig_fetchrow(query, *args)
     db.fetchrow = fetchrow_after_advance
     r = await core.advance_season_if_ready("c", session_number=1)
     assert r["advanced"] is True and r["reasons"] == ["Season already advanced."]
     assert db.executed == [], "no writes when already advanced"
-    results.append(("already-advanced", "OK", r["reasons"][0]))
 
-    # --- Path 5: No evaluation data ---
+
+def test_already_advanced():
+    asyncio.run(path_already_advanced())
+
+
+async def path_no_data():
     db = FakeDB(season="summer", sessions=2, evals=0, aligned=0, identity_memories=0)
     core = make_core(db)
     r = await core.advance_season_if_ready("n")
     assert r["advanced"] is False
     assert any("evaluations" in x for x in r["reasons"]), r["reasons"]
-    results.append(("no-data", "OK", r["reasons"][0]))
 
+
+def test_no_data():
+    asyncio.run(path_no_data())
+
+
+def main():
+    for fn in (
+        path_winter_final,
+        path_not_ready,
+        path_ready_advance,
+        path_already_advanced,
+        path_no_data,
+    ):
+        asyncio.run(fn())
     print("=" * 60)
-    ok = True
-    for name, status, detail in results:
-        print(f"[{status}] {name}: {detail}")
-        if status != "OK":
-            ok = False
+    print("ALL SEASON-ADVANCE PATHS PASS")
     print("=" * 60)
-    print("ALL SEASON-ADVANCE PATHS PASS" if ok else "FAILURES PRESENT")
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    main()

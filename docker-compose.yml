@@ -29,7 +29,7 @@ services:
   dragonfly:
     image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
     container_name: collabsmart-dragonfly
-    command: dragonfly --logtostderr --requirepass ${DRAGONFLY_PASSWORD:-collabsmart} --maxmemory ${DRAGONFLY_MAX_MEMORY:-2gb}
+    command: dragonfly --logtostderr --requirepass ${DRAGONFLY_PASSWORD:-collabsmart} --maxmemory ${DRAGONFLY_MAX_MEMORY:-2gb} --proactor_threads=4
     environment:
       - DRAGONFLY_PASSWORD=${DRAGONFLY_PASSWORD:-collabsmart}
     ulimits:
@@ -77,16 +77,29 @@ services:
 
   lina:
     build:
-      context: ./backend/lina
-      dockerfile: Dockerfile
+      context: ./backend
+      dockerfile: lina/Dockerfile
     container_name: collabsmart-lina
     environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - DATABASE_URL=postgresql://${POSTGRES_USER:-collabsmart}:${POSTGRES_PASSWORD:-collabsmart}@postgres:5432/${POSTGRES_DB:-collabsmart}
       - REDIS_URL=redis://:${DRAGONFLY_PASSWORD:-collabsmart}@dragonfly:6379
-      - LINA_MODEL=${LINA_MODEL:-claude-haiku-4-5-20251001}
+      # LINA's voice — provider-agnostic, defaulting to DeepSeek.
+      - AI_PROVIDER=${AI_PROVIDER:-deepseek}
+      - AI_PROVIDERS=${AI_PROVIDERS:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # Service + nervous system configuration.
+      - HOST=0.0.0.0
+      - PORT=8001
+      - IPC_FORESIGHT_TIMEOUT=${IPC_FORESIGHT_TIMEOUT:-2.5}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LINA_MAX_TOKENS=${LINA_MAX_TOKENS:-4096}
-      - LINA_LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LINA_VOICE_MAX_CONCURRENT=${LINA_VOICE_MAX_CONCURRENT:-4}
+      # Optional services (opt-in).
+      - METRICS_ENABLED=${METRICS_ENABLED:-0}
+      - HEARTBEAT_ENABLED=${HEARTBEAT_ENABLED:-0}
     ports:
       - "8001:8001"
     networks:

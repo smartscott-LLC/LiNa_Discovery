@@ -1,0 +1,52 @@
+"""The `AIProvider` contract — every instrument in LINA's orchestra."""
+
+from abc import ABC, abstractmethod
+from typing import Any
+
+
+class ProviderError(Exception):
+    """A provider rejected or failed to complete a generation."""
+
+
+class VoicePoolError(ProviderError):
+    """Every provider in the pool failed — LINA has no voice right now."""
+
+
+class AIProvider(ABC):
+    """A single LLM voice adapter.
+
+    LINA speaks through whichever provider is injected at runtime. The rest
+    of the system never names a provider — it only knows this contract.
+    """
+
+    #: Stable identifier used by configuration (AI_PROVIDER / AI_PROVIDERS).
+    name: str = "abstract"
+
+    #: Human-readable summary for logs and observability.
+    label: str = "abstract"
+
+    @abstractmethod
+    async def generate(
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> str:
+        """Generate a completion.
+
+        Args:
+            system: The system prompt (LINA's voice). Empty string when the
+                caller does not use one.
+            messages: Conversation history in ``[{"role", "content"}]`` form.
+            **kwargs: Provider options (``max_tokens``, ``temperature``, …).
+
+        Returns:
+            The complete text response.
+        """
+        raise NotImplementedError
+
+    async def aclose(self) -> None:
+        """Release provider resources (clients, sessions). Idempotent."""
+
+    def __repr__(self) -> str:  # pragma: no cover - trivial
+        return f"<{type(self).__name__} name={self.name!r}>"

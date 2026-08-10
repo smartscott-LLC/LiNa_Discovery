@@ -93,9 +93,10 @@ def test_large_message_and_full():
     # exceeding capacity raises
     try:
         b.push_tx(os.urandom(65536))
-        results.append(("too-large rejected", "FAIL: accepted oversized message"))
+        raise AssertionError("oversized message must be rejected")
     except RuntimeError:
-        results.append(("too-large rejected", "OK"))
+        pass
+    results.append(("large message + full", "OK"))
 
 def test_view_lifetime():
     # memoryview keeps the bridge alive after we drop our reference
@@ -105,20 +106,21 @@ def test_view_lifetime():
     del b
     assert view.nbytes == 65536  # still valid — strong ref held
 
-check("import", test_import)
-check("bridge creation", test_bridge_creation)
-check("push/pop roundtrip", test_push_pop_roundtrip)
-check("rx loopback", test_rx_loopback)
-check("zero-copy memoryview", test_zero_copy_memoryview)
-check("status after ops", test_status_after_ops)
-check("large message + full", test_large_message_and_full)
-check("view lifetime", test_view_lifetime)
+if __name__ == "__main__":
+    check("import", test_import)
+    check("bridge creation", test_bridge_creation)
+    check("push/pop roundtrip", test_push_pop_roundtrip)
+    check("rx loopback", test_rx_loopback)
+    check("zero-copy memoryview", test_zero_copy_memoryview)
+    check("status after ops", test_status_after_ops)
+    check("large message + full", test_large_message_and_full)
+    check("view lifetime", test_view_lifetime)
 
-print("=" * 60)
-ok = True
-for name, status in results:
-    print(f"[{status}] {name}")
-    if status != "OK":
-        ok = False
-print("=" * 60)
-print("ALL IPC BRIDGE TESTS PASS" if ok else "FAILURES PRESENT")
+    print("=" * 60)
+    ok = True
+    for name, status in results:
+        print(f"[{status}] {name}")
+        if status != "OK":
+            ok = False
+    print("=" * 60)
+    print("ALL IPC BRIDGE TESTS PASS" if ok else "FAILURES PRESENT")

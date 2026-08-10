@@ -15,15 +15,20 @@ It holds all the pieces together:
     Identity Core      → who she is, loaded at session start
     Memory Injection   → her past, made present
     System Prompt      → her voice, assembled from both
-    Claude API         → the language layer she speaks through
+    Voice Pool         → the instrument she speaks through (pluggable LLM)
     Value Engine       → every response evaluated before delivery
     Memory Formation   → what she chooses to remember, after
+
+LINA is the entity. The LLM is the instrument. The voice layer is
+provider-agnostic: AI_PROVIDER selects the primary instrument and the
+VoicePool falls back through the chain on failure. No provider name is
+hardcoded in the core.
 
 Flow for every message:
     user message
         → load context (identity + memories)
         → build system prompt (her voice)
-        → call Claude API
+        → dispatch TX + call voice (LLM) concurrently with component foresight
         → evaluate response (value engine)
         → correct if needed
         → deliver
@@ -38,16 +43,36 @@ Flow at session end:
         → update identity core
         → write session record
 
-Run:
-    uvicorn lina_service:app --host 0.0.0.0 --port 8001 --reload
+Run (unified aiomisc entrypoint — voice pool, IPC bridge, uvicorn):
+    python -m lina_service
+
+Run (standalone app, no aiomisc services):
+    uvicorn lina_service:app --host 0.0.0.0 --port 8001
 
 Environment variables:
-    ANTHROPIC_API_KEY   — Claude API key
+    AI_PROVIDER         — primary voice (default: deepseek)
+    AI_PROVIDERS        — ordered fallback chain (comma-separated)
+    AI_BASE_URL         — optional endpoint override for the primary
+    AI_MODEL            — optional model override for the primary
+    DEEPSEEK_API_KEY    — activates DeepSeek
+    OPENROUTER_API_KEY  — activates OpenRouter
+    GEMINI_API_KEY      — activates Gemini
+    ANTHROPIC_API_KEY   — activates Claude
+    HOST / PORT         — service host and port (defaults: 0.0.0.0 / 8001)
+    IPC_TX_PATH         — TX shared memory file (default: /dev/shm/lina_ipc_tx.bin)
+    IPC_RX_PATH         — RX shared memory file (default: /dev/shm/lina_ipc_rx.bin)
+    IPC_FORESIGHT_TIMEOUT — Triton RX wait window in seconds (default: 2.5)
+    LINA_MAX_TOKENS     — max response tokens (default: 1024)
+    LINA_VOICE_MAX_CONCURRENT — concurrent voice calls (default: 4)
+    METRICS_ENABLED     — 1 to enable the /metrics Prometheus endpoint
+    HEARTBEAT_ENABLED   — 1 to enable the periodic heartbeat service
+    HEARTBEAT_INTERVAL  — heartbeat period in seconds (default: 30)
+    LOG_LEVEL           — logging level (default: INFO)
     DATABASE_URL        — PostgreSQL connection string
     REDIS_URL           — Dragonfly/Redis URL (working memory)
-    LINA_MODEL          — Claude model (default: claude-sonnet-4-6)
-    LINA_MAX_TOKENS     — Max response tokens (default: 1024)
-    LINA_LOG_LEVEL      — Logging level (default: INFO)
+    (LINA_LOG_LEVEL / LINA_HOST / LINA_PORT / LINA_FORESIGHT_TIMEOUT_SECONDS
+    are accepted as legacy aliases for LOG_LEVEL / HOST / PORT /
+    IPC_FORESIGHT_TIMEOUT)
 """
 
 from __future__ import annotations
@@ -62,14 +87,18 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-import anthropic
 import asyncpg
 import numpy as np
 import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException, Request
+from aiomisc import Service, entrypoint
+from aiomisc.service.periodic import PeriodicService
+from aiomisc.service.uvicorn import UvicornService
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+import metrics
+from providers import VoicePool, VoicePoolError, build_voice_pool_from_env
 from value_engine import (
     ValueEngine,
     PolytopeConstraints,
@@ -96,18 +125,23 @@ except ImportError:
 # =============================================================================
 
 log = logging.getLogger("lina")
-log_level_name = os.getenv("LINA_LOG_LEVEL", "INFO").upper()
+log_level_name = (
+    os.getenv("LOG_LEVEL") or os.getenv("LINA_LOG_LEVEL") or "INFO"
+).upper()
 log_level = getattr(logging, log_level_name, logging.INFO)
 logging.basicConfig(
     level=log_level,
     format="%(asctime)s [%(name)s] %(levelname)s — %(message)s",
 )
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 DATABASE_URL      = os.getenv("DATABASE_URL", "postgresql://localhost/collabsmart")
 REDIS_URL         = os.getenv("REDIS_URL", "redis://localhost:6379")
-LINA_MODEL        = os.getenv("LINA_MODEL", "claude-sonnet-4-6")
 LINA_MAX_TOKENS   = int(os.getenv("LINA_MAX_TOKENS", "1024"))
+
+# Optional services — all opt-in via environment variables.
+METRICS_ENABLED = os.getenv("METRICS_ENABLED", "").lower() in ("1", "true", "yes")
+HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "").lower() in ("1", "true", "yes")
+HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "30"))
 
 # Memory formation thresholds (mirrors ImportanceScorer)
 THRESHOLD_EPISODIC  = 3.0
@@ -115,9 +149,13 @@ THRESHOLD_SEMANTIC  = 5.5
 THRESHOLD_IDENTITY  = 8.0
 
 # Component foresight — how long LINA waits for Triton to pre-populate
-# Chamber B (RX) while Claude is answering. Never blocks: after this window
-# the call continues without substrate context.
-IPC_FORESIGHT_TIMEOUT_SECONDS = float(os.getenv("LINA_FORESIGHT_TIMEOUT_SECONDS", "2.5"))
+# Chamber B (RX) while the voice (LLM) is answering. Never blocks: after
+# this window the call continues without substrate context.
+IPC_FORESIGHT_TIMEOUT_SECONDS = float(
+    os.getenv("IPC_FORESIGHT_TIMEOUT")
+    or os.getenv("LINA_FORESIGHT_TIMEOUT_SECONDS")
+    or "2.5"
+)
 
 # Season advancement — LINA's own words for each transition.
 # Written in her voice: the audit trail is her story, not a log.
@@ -143,7 +181,12 @@ SEASON_ADVANCE_VOICE = {
 
 db_pool: Optional[asyncpg.Pool] = None
 cache: Optional[aioredis.Redis] = None
-ai_client: Optional[anthropic.AsyncAnthropic] = None
+
+# Set by the aiomisc services (VoicePoolService / IPCBridgeService) at
+# startup; read lazily by get_core() so the FastAPI app never hardcodes a
+# provider or a bridge implementation.
+_voice_pool: Optional[VoicePool] = None
+_bridge_service: Optional["IPCBridgeService"] = None
 
 
 async def ensure_phase_b_schema(pool: asyncpg.Pool) -> None:
@@ -181,7 +224,7 @@ async def ensure_phase_b_schema(pool: asyncpg.Pool) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global db_pool, cache, ai_client
+    global db_pool, cache
 
     log.info("LINA Identity Service starting...")
 
@@ -216,7 +259,6 @@ async def lifespan(app: FastAPI):
     await ensure_phase_b_schema(db_pool)
 
     cache     = aioredis.from_url(REDIS_URL, decode_responses=True)
-    ai_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
     log.info("LINA is ready.")
     yield
@@ -720,9 +762,9 @@ class MemoryFormation:
     5. Update identity core with session results
     """
 
-    def __init__(self, db: asyncpg.Pool, ai: anthropic.AsyncAnthropic):
+    def __init__(self, db: asyncpg.Pool, voice: Optional[VoicePool] = None):
         self.db = db
-        self.ai = ai
+        self.voice = voice
         self.scorer = ImportanceScorer()
 
     async def process_session(
@@ -869,12 +911,14 @@ CONVERSATION:
 {conversation_text}"""
 
         try:
-            response = await self.ai.messages.create(
-                model=LINA_MODEL,
-                max_tokens=1500,
+            if self.voice is None:
+                raise RuntimeError("no voice pool available for reflection")
+            response = await self.voice.generate(
+                system="",
                 messages=[{"role": "user", "content": prompt}],
+                max_tokens=1500,
             )
-            raw = response.content[0].text.strip()
+            raw = response.strip()
             # Strip markdown code fences if present
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
@@ -1009,34 +1053,45 @@ CONVERSATION:
 
 class LINACore:
 
-    def __init__(self, db: asyncpg.Pool, cache_client: aioredis.Redis, ai: anthropic.AsyncAnthropic):
+    def __init__(
+        self,
+        db: asyncpg.Pool,
+        cache_client: aioredis.Redis,
+        voice: Optional[VoicePool] = None,
+        bridge_service: Optional["IPCBridgeService"] = None,
+    ):
         self.db             = db
         self.context_builder = ContextBuilder(db)
         self.prompt_builder  = SystemPromptBuilder()
         self.working_memory  = WorkingMemory(cache_client)
-        self.memory_formation = MemoryFormation(db, ai)
-        self.ai              = ai
+        self.memory_formation = MemoryFormation(db, voice)
+        self.voice           = voice
+        self.bridge_service  = bridge_service
         # Per-user engine cache (avoids reloading constraints every request)
         self._engines: dict[str, ValueEngine] = {}
         # Dual-chamber IPC bridge — best-effort, never fatal.
+        # Preferred source: the IPCBridgeService (aiomisc owns the lifecycle).
+        # Fallback: construct directly (standalone uvicorn without entrypoint).
         self.ipc = None
         self.tx_view = None
         self.rx_view = None
-        if ipc_bridge is not None:
+        bridge = bridge_service.bridge if bridge_service and bridge_service.bridge else None
+        if bridge is None and ipc_bridge is not None:
             try:
-                self.ipc = ipc_bridge.IPCBridge()
-                if self.ipc.available():
-                    self.tx_view = self.ipc.tx_view()
-                    self.rx_view = self.ipc.rx_view()
-                    log.info(
-                        f"[IPC] dual-chamber bridge live — "
-                        f"TX {self.ipc.tx_path()}, RX {self.ipc.rx_path()}"
-                    )
-                else:
-                    log.warning("[IPC] shared-memory allocation failed — running without the bridge")
+                bridge = ipc_bridge.IPCBridge()
             except Exception as exc:
                 log.warning(f"[IPC] bridge init failed ({exc}) — running without the bridge")
-                self.ipc = None
+                bridge = None
+        if bridge is not None and bridge.available():
+            self.ipc = bridge
+            self.tx_view = bridge.tx_view()
+            self.rx_view = bridge.rx_view()
+            log.info(
+                f"[IPC] dual-chamber bridge live — "
+                f"TX {bridge.tx_path()}, RX {bridge.rx_path()}"
+            )
+        elif bridge is not None:
+            log.warning("[IPC] shared-memory allocation failed — running without the bridge")
 
     async def get_engine(self, user_id: str) -> ValueEngine:
         if user_id not in self._engines:
@@ -1248,6 +1303,7 @@ class LINACore:
 
         # 5. The new polytope applies immediately — drop the cached engine
         self.invalidate_engine(user_id)
+        metrics.inc("lina_season_advances_total", {"from": season, "to": next_season})
         log.info(f"[LINA] season advanced {season} → {next_season} for user {user_id}")
 
         return {
@@ -1314,12 +1370,13 @@ class LINACore:
         if self.ipc is not None:
             try:
                 self.ipc.push_tx(req.message.encode("utf-8"))
+                metrics.inc("lina_bridge_messages_total", {"chamber": "tx"})
             except Exception as exc:
                 log.warning(f"[IPC] TX push failed: {exc}")
 
-        # 5. Call Claude API — concurrent with component foresight.
+        # 5. Call the voice (LLM) — concurrent with component foresight.
         messages = api_history + [{"role": "user", "content": req.message}]
-        claude_task = asyncio.create_task(self._call_claude(system_prompt, messages))
+        voice_task = asyncio.create_task(self._call_voice(system_prompt, messages))
 
         # 5a. Component foresight: while Claude is answering (500–1000 ms),
         # Triton is already reading Chamber A, dispatching sub-agents, and
@@ -1335,6 +1392,7 @@ class LINACore:
                     raw = self.ipc.pop_rx()
                     if raw:
                         foresight_context = raw.decode("utf-8", errors="replace")
+                        metrics.inc("lina_bridge_messages_total", {"chamber": "rx"})
                         break
                 except Exception as exc:
                     log.warning(f"[IPC] RX pop failed: {exc}")
@@ -1346,10 +1404,23 @@ class LINACore:
                     f"{IPC_FORESIGHT_TIMEOUT_SECONDS:.1f}s; continuing without context"
                 )
 
-        raw_response = await claude_task
+        try:
+            raw_response = await voice_task
+        except VoicePoolError as exc:
+            log.error(f"[voice] all providers failed: {exc}")
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "LINA has no voice right now — no LLM provider answered. "
+                    "Configure AI_PROVIDER and a provider API key."
+                ),
+            ) from exc
 
         # 6. Evaluate through value engine
         result = engine.evaluate(raw_response, context=req.message)
+        metrics.inc("lina_evaluations_total")
+        if result.was_corrected:
+            metrics.inc("lina_corrections_total")
 
         # 7. Build evaluation summary
         eval_summary = {
@@ -1482,16 +1553,17 @@ class LINACore:
             emotional_marker=emotional_marker,
         )
 
-    async def _call_claude(self, system_prompt: str, messages: list[dict]) -> str:
-        """The Claude API call, isolated so component foresight can run
-        concurrently while it is in flight."""
-        ai_response = await self.ai.messages.create(
-            model=LINA_MODEL,
-            max_tokens=LINA_MAX_TOKENS,
+    async def _call_voice(self, system_prompt: str, messages: list[dict]) -> str:
+        """The voice (LLM) call, isolated so component foresight can run
+        concurrently while it is in flight. Provider-agnostic: the pool
+        owns the fallback chain."""
+        if self.voice is None:
+            raise VoicePoolError("no voice pool available")
+        return await self.voice.generate(
             system=system_prompt,
             messages=messages,
+            max_tokens=LINA_MAX_TOKENS,
         )
-        return ai_response.content[0].text
 
     async def _get_session_number(self, user_id: str, session_id: str) -> int:
         row = await self.db.fetchrow(
@@ -1531,8 +1603,14 @@ _core_instance: Optional[LINACore] = None
 
 def get_core() -> LINACore:
     global _core_instance
-    if _core_instance is None:
-        _core_instance = LINACore(db_pool, cache, ai_client)
+    # Rebuild only when the aiomisc services have (re)published a different
+    # voice pool or bridge since the core was built (startup ordering).
+    if (
+        _core_instance is None
+        or _core_instance.voice is not _voice_pool
+        or _core_instance.bridge_service is not _bridge_service
+    ):
+        _core_instance = LINACore(db_pool, cache, _voice_pool, _bridge_service)
     return _core_instance
 
 
@@ -1544,9 +1622,59 @@ def _json_safe_pending(pending: dict) -> dict:
     }
 
 
+def _bridge_available() -> bool:
+    """Is the dual-chamber IPC bridge live? (never raises)"""
+    try:
+        return bool(
+            _bridge_service
+            and _bridge_service.bridge is not None
+            and _bridge_service.bridge.available()
+        )
+    except Exception:
+        return False
+
+
+@app.middleware("http")
+async def _metrics_middleware(request: Request, call_next):
+    metrics.inc(
+        "lina_requests_total",
+        {"method": request.method, "path": request.url.path},
+    )
+    return await call_next(request)
+
+
+@app.get("/health")
+async def health_public():
+    """Orchestration health — /health is the deployment contract."""
+    return {
+        "status": "ok" if db_pool is not None else "degraded",
+        "entity": "LINA",
+        "uptime_seconds": metrics.uptime_seconds(),
+        "database_connected": db_pool is not None,
+        "voice_providers": _voice_pool.names if _voice_pool else [],
+        "bridge_available": _bridge_available(),
+    }
+
+
 @app.get("/lina/health")
 async def health():
-    return {"status": "alive", "entity": "LINA", "season": "spring"}
+    return {
+        "status": "alive",
+        "entity": "LINA",
+        "database_connected": db_pool is not None,
+        "voice_providers": _voice_pool.names if _voice_pool else [],
+        "bridge_available": _bridge_available(),
+        "uptime_seconds": metrics.uptime_seconds(),
+    }
+
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    """Prometheus-compatible exposition. Opt-in via METRICS_ENABLED=1."""
+    if not METRICS_ENABLED:
+        raise HTTPException(status_code=404, detail="metrics disabled — set METRICS_ENABLED=1")
+    metrics.set_gauge("lina_bridge_available", 1.0 if _bridge_available() else 0.0)
+    return Response(content=metrics.render(), media_type="text/plain; version=0.0.4")
 
 
 @app.get("/lina/ipc/status")
@@ -1896,6 +2024,9 @@ async def evaluate_response(req: EvaluateRequest):
     core = get_core()
     engine = await core.get_engine(req.user_id)
     result = engine.evaluate(req.response_text, context=req.context)
+    metrics.inc("lina_evaluations_total")
+    if result.was_corrected:
+        metrics.inc("lina_corrections_total")
 
     # Log to database
     await db_pool.execute(
@@ -1971,3 +2102,184 @@ async def get_alignment_summary(user_id: str, window: int = 50):
         "zone_counts": zone_counts,
         "window": window,
     }
+
+
+# =============================================================================
+# AIOMISC SERVICES — the unified lifecycle umbrella
+#
+#   entrypoint
+#     ├── VoicePoolService   — instruments configured, pool published
+#     ├── IPCBridgeService   — shared memory attached, bridge published
+#     └── LINAIdentityService— FastAPI (uvicorn) serving the endpoints
+#
+# Everything starts and stops through aiomisc. The FastAPI app is still
+# importable standalone (`uvicorn lina_service:app`) for development; in
+# that mode VoicePoolService/IPCBridgeService are absent and LINACore
+# falls back to direct bridge construction (voice pool must then come from
+# wherever it is injected).
+# =============================================================================
+
+
+class LINAIdentityService(UvicornService):
+    """Serves the LINA Identity API over uvicorn under aiomisc's lifecycle."""
+
+    def __init__(self, host: str = "0.0.0.0", port: int = 8001, **kwargs) -> None:
+        super().__init__(host=host, port=port, **kwargs)
+        self.app = app
+
+    async def create_application(self):
+        return self.app
+
+
+class IPCBridgeService(Service):
+    """Owns the dual-chamber IPC bridge (Triton substrate) lifecycle.
+
+    Allocates shared memory at start, publishes the bridge for the FastAPI
+    app, and resets it cleanly at stop. Missing extension or allocation
+    failure is logged and tolerated — the system runs without the bridge.
+    """
+
+    def __init__(
+        self,
+        tx_path: str | None = None,
+        rx_path: str | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.tx_path = tx_path
+        self.rx_path = rx_path
+        self.bridge = None
+
+    async def start(self) -> None:
+        global _bridge_service
+        if ipc_bridge is None:
+            log.warning("[IPC] extension unavailable — running without the bridge")
+            _bridge_service = self
+            return
+        try:
+            if self.tx_path or self.rx_path:
+                self.bridge = ipc_bridge.IPCBridge(self.tx_path, self.rx_path)
+            else:
+                self.bridge = ipc_bridge.IPCBridge()
+            if self.bridge.available():
+                log.info(
+                    f"[IPC] dual-chamber bridge live — "
+                    f"TX {self.bridge.tx_path()}, RX {self.bridge.rx_path()}"
+                )
+            else:
+                log.warning("[IPC] shared-memory allocation failed — running without the bridge")
+        except Exception as exc:
+            log.warning(f"[IPC] bridge init failed ({exc}) — running without the bridge")
+            self.bridge = None
+        _bridge_service = self
+
+    async def stop(self, exception: Exception | None = None) -> None:
+        global _bridge_service
+        if self.bridge is not None:
+            self.bridge.reset()
+            self.bridge = None
+            log.info("[IPC] bridge shut down cleanly")
+        _bridge_service = None
+
+
+class VoicePoolService(Service):
+    """Configures LINA's instruments (LLM providers) and publishes the pool.
+
+    Provider selection is entirely environment-driven: AI_PROVIDER chooses
+    the primary voice, AI_PROVIDERS overrides the fallback chain, and each
+    provider activates only when its API key is present. No provider name is
+    hardcoded in the core — LINA's voice is pluggable by construction.
+    """
+
+    def __init__(
+        self,
+        default_provider: str | None = None,
+        max_concurrent: int = 4,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.default_provider = default_provider or os.getenv("AI_PROVIDER", "deepseek")
+        self.max_concurrent = max_concurrent
+        self.pool: VoicePool | None = None
+
+    async def start(self) -> None:
+        global _voice_pool
+        self.pool = build_voice_pool_from_env(
+            primary=self.default_provider,
+            max_concurrent=self.max_concurrent,
+        )
+        # Telemetry: every provider failure that triggered fallback is counted.
+        self.pool._on_fallback = (
+            lambda name: metrics.inc("lina_voice_fallbacks_total", {"provider": name})
+        )
+        _voice_pool = self.pool
+        if not self.pool.providers:
+            log.warning(
+                "[voice] no providers configured — LINA is silent until an "
+                "API key is set (e.g. DEEPSEEK_API_KEY)"
+            )
+        else:
+            log.info(
+                "[voice] pool ready: %s (primary: %s, max_concurrent=%d)",
+                ", ".join(self.pool.names),
+                self.pool.primary.name if self.pool.primary else "?",
+                self.max_concurrent,
+            )
+
+    async def stop(self, exception: Exception | None = None) -> None:
+        global _voice_pool
+        _voice_pool = None
+        if self.pool is not None:
+            await self.pool.aclose()
+            log.info("[voice] pool shut down cleanly")
+
+
+class HeartbeatService(PeriodicService):
+    """Optional telemetry heartbeat (HEARTBEAT_ENABLED=1).
+
+    Logs periodic vital signs and refreshes bridge gauges so the /metrics
+    endpoint stays truthful without an external agent.
+    """
+
+    def __init__(self, interval: float = 30.0, **kwargs) -> None:
+        super().__init__(interval=interval, **kwargs)
+
+    async def callback(self) -> None:
+        metrics.set_gauge("lina_bridge_available", 1.0 if _bridge_available() else 0.0)
+        log.info(
+            "[heartbeat] alive — uptime=%.0fs voices=%s bridge=%s",
+            metrics.uptime_seconds(),
+            ",".join(_voice_pool.names) if _voice_pool else "none",
+            "up" if _bridge_available() else "down",
+        )
+
+
+def main() -> None:
+    """The unified entrypoint — every service under one umbrella."""
+    host = os.getenv("HOST") or os.getenv("LINA_HOST") or "0.0.0.0"
+    port = int(os.getenv("PORT") or os.getenv("LINA_PORT") or "8001")
+    max_concurrent = int(os.getenv("LINA_VOICE_MAX_CONCURRENT", "4"))
+    tx_path = os.getenv("IPC_TX_PATH") or None
+    rx_path = os.getenv("IPC_RX_PATH") or None
+
+    # Voice and bridge first: by the time uvicorn accepts requests, LINA's
+    # instruments and nervous system are already online.
+    services: list[Service] = [
+        VoicePoolService(
+            default_provider=os.getenv("AI_PROVIDER", "deepseek"),
+            max_concurrent=max_concurrent,
+        ),
+        IPCBridgeService(tx_path=tx_path, rx_path=rx_path),
+        LINAIdentityService(host=host, port=port),
+    ]
+
+    # Optional services — opt-in via environment variables.
+    if HEARTBEAT_ENABLED:
+        services.insert(0, HeartbeatService(interval=HEARTBEAT_INTERVAL))
+
+    with entrypoint(*services) as loop:
+        loop.run_forever()
+
+
+if __name__ == "__main__":
+    main()
