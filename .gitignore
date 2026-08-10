@@ -23,5 +23,12 @@ sage.txt
 bootstrap.txt
 Makefile.txt
 
+# Rust
+backend/ipc/target/
+backend/ipc-core/target/
+backend/triton/target/
+backend/ipc/python/ipc_bridge/*.so
+# Cargo.lock files are committed for reproducible Docker builds
+
 # OS files
 thumbs.db

@@ -1,0 +1,13 @@
+[package]
+name = "ipc_core"
+version = "0.1.0"
+edition = "2021"
+description = "LINA/Triton dual-chamber shared-memory core — pure Rust, no Python bindings"
+license = "MIT"
+
+[dependencies]
+memmap3 = "0.1"
+
+[profile.release]
+lto = true
+opt-level = 3

@@ -1,0 +1,140 @@
+# Translations template for aiomisc.
+# Copyright (C) 2021
+# This file is distributed under the same license as the aiomisc project.
+# Dmitry Orlov <me@mosquito.su>, 2022.
+msgid ""
+msgstr ""
+"Project-Id-Version: aiomisc 16.1.16\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-02-09 00:01+0100\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: Sitkin Ivan <alvinera@yandex.ru>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/api/aiomisc_log.rst:2
+msgid "``aiomisc_log`` module"
+msgstr "Модуль ``aiomisc_log``"
+
+#: ../../source/api/aiomisc_log.rst:5
+msgid "``aiomisc_log.formatter.color`` module"
+msgstr "Модуль ``aiomisc_log.formatter.color``"
+
+#: ../../source/api/aiomisc_log.rst:13
+msgid "``aiomisc_log.formatter.journald`` module"
+msgstr "Модуль ``aiomisc_log.formatter.journald``"
+
+#: ../../source/api/aiomisc_log.rst:21
+msgid "``aiomisc_log.formatter.json`` module"
+msgstr "Модуль ``aiomisc_log.formatter.json``"
+
+#: aiomisc_log.formatter.json.JSONLogFormatter:1 of
+msgid "Initialize the formatter with specified format strings."
+msgstr "Инициализация форматировщика с указанными строками формата."
+
+#: aiomisc_log.formatter.json.JSONLogFormatter:3 of
+msgid ""
+"Initialize the formatter either with the specified format string, or a "
+"default as described above. Allow for specialized date formatting with "
+"the optional datefmt argument. If datefmt is omitted, you get an "
+"ISO8601-like (or RFC 3339-like) format."
+msgstr ""
+"Инициализация форматировщика с указанной строкой формата или со значением "
+"по умолчанию, как описано выше. Допускается специализированное "
+"форматирование даты с помощью необязательного аргумента datefmt. Если "
+"datefmt не указан, используется формат, совместимый с ISO8601 "
+"(или RFC 3339)."
+
+#: aiomisc_log.formatter.json.JSONLogFormatter:8 of
+#, python-format
+msgid ""
+"Use a style parameter of '%', '{' or '$' to specify that you want to use "
+"one of %-formatting, :meth:`str.format` (``{}``) formatting or "
+":class:`string.Template` formatting in your format string."
+msgstr ""
+"Используйте параметр style со значением '%', '{' или '$', чтобы указать, "
+"что вы хотите использовать %-форматирование, форматирование "
+":meth:`str.format` (``{}``) или форматирование "
+":class:`string.Template` в строке формата."
+
+#: aiomisc_log.formatter.json.JSONLogFormatter:12 of
+msgid "Added the ``style`` parameter."
+msgstr "Добавлен параметр ``style``."
+
+#: aiomisc_log.formatter.json.JSONLogFormatter.format:1 of
+msgid "Format the specified record as text."
+msgstr "Форматирование указанной записи в виде текста."
+
+#: aiomisc_log.formatter.json.JSONLogFormatter.format:3 of
+msgid ""
+"The record's attribute dictionary is used as the operand to a string "
+"formatting operation which yields the returned string. Before formatting "
+"the dictionary, a couple of preparatory steps are carried out. The "
+"message attribute of the record is computed using LogRecord.getMessage()."
+" If the formatting string uses the time (as determined by a call to "
+"usesTime(), formatTime() is called to format the event time. If there is "
+"exception information, it is formatted using formatException() and "
+"appended to the message."
+msgstr ""
+"Словарь атрибутов записи используется как операнд операции форматирования "
+"строки, результатом которой является возвращаемая строка. Перед "
+"форматированием словаря выполняется ряд подготовительных шагов. Атрибут "
+"message записи вычисляется с помощью LogRecord.getMessage(). Если строка "
+"форматирования использует время (что определяется вызовом usesTime()), "
+"вызывается formatTime() для форматирования времени события. При наличии "
+"информации об исключении она форматируется с помощью formatException() и "
+"добавляется к сообщению."
+
+#: aiomisc_log.formatter.json.JSONLogFormatter.formatException:1 of
+msgid "Format and return the specified exception information as a string."
+msgstr "Форматирование и возврат указанной информации об исключении в виде строки."
+
+#: aiomisc_log.formatter.json.JSONLogFormatter.formatException:3 of
+msgid "This default implementation just uses traceback.print_exception()"
+msgstr "Реализация по умолчанию использует traceback.print_exception()"
+
+#: aiomisc_log.formatter.json.JSONLogFormatter.formatTime:1 of
+msgid "Return the creation time of the specified LogRecord as formatted text."
+msgstr "Возврат времени создания указанной записи LogRecord в виде форматированного текста."
+
+#: aiomisc_log.formatter.json.JSONLogFormatter.formatTime:3 of
+msgid ""
+"This method should be called from format() by a formatter which wants to "
+"make use of a formatted time. This method can be overridden in formatters"
+" to provide for any specific requirement, but the basic behaviour is as "
+"follows: if datefmt (a string) is specified, it is used with "
+"time.strftime() to format the creation time of the record. Otherwise, an "
+"ISO8601-like (or RFC 3339-like) format is used. The resulting string is "
+"returned. This function uses a user-configurable function to convert the "
+"creation time to a tuple. By default, time.localtime() is used; to change"
+" this for a particular formatter instance, set the 'converter' attribute "
+"to a function with the same signature as time.localtime() or "
+"time.gmtime(). To change it for all formatters, for example if you want "
+"all logging times to be shown in GMT, set the 'converter' attribute in "
+"the Formatter class."
+msgstr ""
+"Этот метод должен вызываться из format() форматировщиком, которому "
+"необходимо использовать форматированное время. Метод может быть "
+"переопределён в форматировщиках для обеспечения специфических требований, "
+"но базовое поведение следующее: если указан datefmt (строка), он "
+"используется совместно с time.strftime() для форматирования времени "
+"создания записи. В противном случае используется формат, совместимый с "
+"ISO8601 (или RFC 3339). Возвращается результирующая строка. Эта функция "
+"использует настраиваемую пользователем функцию для преобразования времени "
+"создания в кортеж. По умолчанию используется time.localtime(); чтобы "
+"изменить это для конкретного экземпляра форматировщика, установите атрибут "
+"'converter' в функцию с такой же сигнатурой, как у time.localtime() или "
+"time.gmtime(). Чтобы изменить это для всех форматировщиков, например, "
+"если вы хотите, чтобы всё время логирования отображалось в GMT, установите "
+"атрибут 'converter' в классе Formatter."
+
+#: ../../source/api/aiomisc_log.rst:29
+msgid "``aiomisc_log.formatter.rich.py`` module"
+msgstr "Модуль ``aiomisc_log.formatter.rich.py``"
+
+#: ../../source/api/aiomisc_log.rst:38
+msgid "``aiomisc_log.enum`` module"
+msgstr "Модуль ``aiomisc_log.enum``"

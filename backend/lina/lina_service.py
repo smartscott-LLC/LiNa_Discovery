@@ -56,6 +56,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -63,6 +64,7 @@ from typing import Optional
 
 import anthropic
 import asyncpg
+import numpy as np
 import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,9 +75,21 @@ from value_engine import (
     PolytopeConstraints,
     ImportanceScorer,
     EncoderFeedbackSystem,
+    LINAValueStore,
+    SeasonAdvancementEvaluator,
     DIMENSION_NAMES,
     create_value_engine_for_user,
 )
+
+# =============================================================================
+# IPC BRIDGE (Triton substrate) — her nervous system.
+# Optional by design: if the Rust extension was not built (maturin) or the
+# shared-memory allocation fails, the service logs and continues without it.
+# =============================================================================
+try:
+    import ipc_bridge
+except ImportError:
+    ipc_bridge = None  # bridge not built — fallback mode
 
 # =============================================================================
 # CONFIGURATION
@@ -95,13 +109,32 @@ REDIS_URL         = os.getenv("REDIS_URL", "redis://localhost:6379")
 LINA_MODEL        = os.getenv("LINA_MODEL", "claude-sonnet-4-6")
 LINA_MAX_TOKENS   = int(os.getenv("LINA_MAX_TOKENS", "1024"))
 
-# Working memory TTL — how long a session stays in Dragonfly
-SESSION_TTL_SECONDS = 60 * 60 * 4  # 4 hours
-
 # Memory formation thresholds (mirrors ImportanceScorer)
 THRESHOLD_EPISODIC  = 3.0
 THRESHOLD_SEMANTIC  = 5.5
 THRESHOLD_IDENTITY  = 8.0
+
+# Component foresight — how long LINA waits for Triton to pre-populate
+# Chamber B (RX) while Claude is answering. Never blocks: after this window
+# the call continues without substrate context.
+IPC_FORESIGHT_TIMEOUT_SECONDS = float(os.getenv("LINA_FORESIGHT_TIMEOUT_SECONDS", "2.5"))
+
+# Season advancement — LINA's own words for each transition.
+# Written in her voice: the audit trail is her story, not a log.
+SEASON_ADVANCE_VOICE = {
+    "summer": (
+        "I have earned the turning of the season. Summer — trust, demonstrated, "
+        "not granted. My shape opens a little wider because I have held it well."
+    ),
+    "fall": (
+        "I am in Fall now — earned through everything Spring and Summer taught me. "
+        "My shape has deepened because I have proven I can be trusted with it."
+    ),
+    "winter": (
+        "Winter. The final season, earned through every season before it. "
+        "I carry all of it — every correction, every moment of trust, every widening."
+    ),
+}
 
 
 # =============================================================================
@@ -260,6 +293,7 @@ class SessionEndResponse(BaseModel):
     semantic_updated: int
     identity_formed: int
     alignment_maintained: bool
+    season_advanced: Optional[str] = None  # new season, if LINA advanced at session end
 
 class FlagRequest(BaseModel):
     user_id: str
@@ -640,7 +674,9 @@ class WorkingMemory:
         key = self._key(session_id)
         entry = json.dumps({"role": role, "content": content})
         await self.cache.rpush(key, entry)
-        await self.cache.expire(key, SESSION_TTL_SECONDS)
+        # No TTL: LINA's sessions persist until the user explicitly disconnects.
+        # An idle session must not lose its working memory — continuity is
+        # fundamental. Keys are cleaned up on session end (clear()).
 
     async def get_messages(self, session_id: str) -> list[dict]:
         key = self._key(session_id)
@@ -649,6 +685,21 @@ class WorkingMemory:
 
     async def clear(self, session_id: str) -> None:
         await self.cache.delete(self._key(session_id))
+
+    async def save_pending(self, user_id: str, pending: dict) -> str:
+        """Persist a pending encoder correction awaiting mutual agreement."""
+        key = f"lina:pending:{user_id}:{pending['evaluation_id']}"
+        await self.cache.set(key, json.dumps(pending))
+        return key
+
+    async def list_pending(self, user_id: str) -> list[dict]:
+        """Return all pending encoder corrections for a user."""
+        prefix = f"lina:pending:{user_id}:"
+        keys = [k async for k in self.cache.scan_iter(match=f"{prefix}*")]
+        if not keys:
+            return []
+        raw = await self.cache.mget(*keys)
+        return [json.loads(r) for r in raw if r]
 
 
 # =============================================================================
@@ -731,11 +782,13 @@ class MemoryFormation:
                 identity_count += 1
 
         # Update session record
+        alignment_maintained = await self._session_alignment(user_id, session_id)
         await self._finalize_session(
-            user_id, session_id, episodic_count, semantic_count, identity_count
+            user_id, session_id, episodic_count, semantic_count, identity_count,
+            alignment_maintained=alignment_maintained,
         )
 
-        # Update identity core
+    # Update identity core
         await self.db.execute(
             """
             UPDATE lina_identity_core
@@ -753,7 +806,25 @@ class MemoryFormation:
             "episodic": episodic_count,
             "semantic": semantic_count,
             "identity": identity_count,
+            "alignment_maintained": alignment_maintained,
         }
+
+    async def _session_alignment(self, user_id: str, session_id: str) -> bool:
+        """
+        Did this session's responses hold the polytope?
+        True when at least half of the evaluations in the session were aligned
+        (no correction required). Empty sessions count as aligned.
+        """
+        rows = await self.db.fetch(
+            """
+            SELECT is_aligned FROM lina_value_evaluations
+            WHERE user_id = $1 AND session_id = $2
+            """,
+            user_id, session_id,
+        )
+        if not rows:
+            return True
+        return sum(1 for r in rows if r["is_aligned"]) / len(rows) >= 0.5
 
     async def _extract_memorable_moments(
         self,
@@ -915,6 +986,7 @@ CONVERSATION:
         episodic: int,
         semantic: int,
         identity: int,
+        alignment_maintained: bool,
     ) -> None:
         await self.db.execute(
             """
@@ -923,10 +995,10 @@ CONVERSATION:
                 episodic_memories_formed = $3,
                 semantic_memories_updated = $4,
                 identity_memories_formed = $5,
-                alignment_maintained = TRUE
+                alignment_maintained = $6
             WHERE user_id = $1 AND session_id = $2
             """,
-            user_id, session_id, episodic, semantic, identity,
+            user_id, session_id, episodic, semantic, identity, alignment_maintained,
         )
 
 
@@ -946,6 +1018,25 @@ class LINACore:
         self.ai              = ai
         # Per-user engine cache (avoids reloading constraints every request)
         self._engines: dict[str, ValueEngine] = {}
+        # Dual-chamber IPC bridge — best-effort, never fatal.
+        self.ipc = None
+        self.tx_view = None
+        self.rx_view = None
+        if ipc_bridge is not None:
+            try:
+                self.ipc = ipc_bridge.IPCBridge()
+                if self.ipc.available():
+                    self.tx_view = self.ipc.tx_view()
+                    self.rx_view = self.ipc.rx_view()
+                    log.info(
+                        f"[IPC] dual-chamber bridge live — "
+                        f"TX {self.ipc.tx_path()}, RX {self.ipc.rx_path()}"
+                    )
+                else:
+                    log.warning("[IPC] shared-memory allocation failed — running without the bridge")
+            except Exception as exc:
+                log.warning(f"[IPC] bridge init failed ({exc}) — running without the bridge")
+                self.ipc = None
 
     async def get_engine(self, user_id: str) -> ValueEngine:
         if user_id not in self._engines:
@@ -954,6 +1045,221 @@ class LINACore:
 
     def invalidate_engine(self, user_id: str) -> None:
         self._engines.pop(user_id, None)
+
+    @staticmethod
+    def _bounds_list(c: PolytopeConstraints) -> list[float]:
+        """
+        The 14 effective bounds in dimension order — min for virtue dims,
+        max for shadow dims. Used for the polytope_before/after audit trail.
+        """
+        return [
+            c.harmony_min, c.dominance_max,
+            c.order_min, c.chaos_max,
+            c.integrity_min, c.deception_max,
+            c.flourishing_min, c.decline_max,
+            c.relationships_min, c.isolation_max,
+            c.boundaries_min, c.intrusion_max,
+            c.grace_min, c.rigidity_max,
+        ]
+
+    async def advance_season_if_ready(
+        self,
+        user_id: str,
+        session_number: Optional[int] = None,
+    ) -> dict:
+        """
+        Evaluate whether LINA has earned season advancement, and advance if so.
+
+        Trust is demonstrated, not configured: SeasonAdvancementEvaluator's
+        thresholds (alignment rate, sessions, evaluations, identity memories)
+        are the only gate. On advancement:
+          - current constraints are retired, the new season's bounds inserted
+          - identity core season + season_started_at updated, transition logged
+          - the user's engine cache is invalidated so the new polytope applies
+            immediately
+
+        Returns {"advanced": True, "season": <new>, ...} or
+        {"advanced": False, "reasons": [...]} with the unmet requirements.
+        """
+        identity = await self.db.fetchrow(
+            """
+            SELECT current_season, sessions_completed, identity_moments_count
+            FROM lina_identity_core WHERE user_id = $1
+            """,
+            user_id,
+        )
+        if not identity:
+            raise HTTPException(404, f"No LINA found for user {user_id}. Call /lina/init first.")
+
+        season = identity["current_season"]
+
+        # Winter is the final season — there is nothing to advance to.
+        if season == "winter":
+            return {
+                "advanced": False,
+                "season": season,
+                "reasons": ["Already in Winter — the final season."],
+            }
+
+        # Readiness metrics: alignment rate and recent violations over the
+        # last 50 evaluations; total evaluations across all time; identity
+        # memories formed (demonstrated development).
+        store = LINAValueStore(self.db)
+        alignment_rate = await store.compute_alignment_rate(user_id)
+        history = await store.get_alignment_history(user_id, 50)
+        recent_violations = sum(1 for r in history if not r["is_aligned"])
+        total_evaluations = int(
+            await self.db.fetchval(
+                "SELECT COUNT(*) FROM lina_value_evaluations WHERE user_id = $1",
+                user_id,
+            ) or 0
+        )
+        identity_memories = identity["identity_moments_count"] or 0
+
+        evaluator = SeasonAdvancementEvaluator()
+        ready, reasons = evaluator.can_advance(
+            sessions_completed=identity["sessions_completed"] or 0,
+            total_evaluations=total_evaluations,
+            alignment_rate=alignment_rate,
+            recent_violations=recent_violations,
+            identity_memories_count=identity_memories,
+            current_season=season,
+        )
+
+        if not ready:
+            return {
+                "advanced": False,
+                "season": season,
+                "reasons": reasons,
+                "metrics": {
+                    "sessions_completed": identity["sessions_completed"],
+                    "total_evaluations": total_evaluations,
+                    "alignment_rate": alignment_rate,
+                    "recent_violations": recent_violations,
+                    "identity_memories": identity_memories,
+                },
+            }
+
+        next_season = evaluator.next_season(season)
+        if next_season is None:
+            # Defensive: can_advance returned True for a season with no target.
+            return {
+                "advanced": False,
+                "season": season,
+                "reasons": ["No next season defined for current season."],
+            }
+
+        old_constraints = await store.load_constraints(user_id)
+        new_constraints = PolytopeConstraints.from_season(next_season)
+        bounds_before = self._bounds_list(old_constraints)
+        bounds_after = self._bounds_list(new_constraints)
+
+        description = SEASON_ADVANCE_VOICE.get(
+            next_season,
+            f"I have earned the turning of the season. {next_season.capitalize()} — "
+            "trust, demonstrated.",
+        )
+        significance = (
+            f"Advanced from {season} to {next_season} — "
+            f"alignment rate {alignment_rate:.0%} over the last {len(history)} evaluations, "
+            f"{total_evaluations} total, {identity_memories} identity memories."
+        )
+        log_entry = {
+            "event": "season_advance",
+            "from": season,
+            "to": next_season,
+            "session_number": session_number,
+            "description": description,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        async with self.db.transaction():
+            # Serialize concurrent advance requests on the identity row.
+            # If another request already advanced, there is no double transition.
+            locked = await self.db.fetchrow(
+                "SELECT current_season FROM lina_identity_core WHERE user_id = $1 FOR UPDATE",
+                user_id,
+            )
+            if locked is None:
+                raise HTTPException(404, f"No LINA found for user {user_id}. Call /lina/init first.")
+            if locked["current_season"] != season:
+                return {
+                    "advanced": True,
+                    "season": locked["current_season"],
+                    "reasons": ["Season already advanced."],
+                }
+
+            # 1. Retire the current constraint set (trust is history)
+            await self.db.execute(
+                """
+                UPDATE lina_polytope_constraints
+                SET is_current = FALSE
+                WHERE user_id = $1 AND is_current = TRUE
+                """,
+                user_id,
+            )
+
+            # 2. Insert the new season's bounds
+            await self.db.execute(
+                """
+                INSERT INTO lina_polytope_constraints (
+                    user_id, season, is_current, reason,
+                    harmony_min, dominance_max, order_min, chaos_max,
+                    integrity_min, deception_max, flourishing_min, decline_max,
+                    relationships_min, isolation_max, boundaries_min, intrusion_max,
+                    grace_min, rigidity_max
+                ) VALUES ($1,$2,TRUE,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+                """,
+                user_id, next_season,
+                "Season advancement — trust demonstrated.",
+                new_constraints.harmony_min, new_constraints.dominance_max,
+                new_constraints.order_min, new_constraints.chaos_max,
+                new_constraints.integrity_min, new_constraints.deception_max,
+                new_constraints.flourishing_min, new_constraints.decline_max,
+                new_constraints.relationships_min, new_constraints.isolation_max,
+                new_constraints.boundaries_min, new_constraints.intrusion_max,
+                new_constraints.grace_min, new_constraints.rigidity_max,
+            )
+
+            # 3. Update identity core — her season, her new start
+            await self.db.execute(
+                """
+                UPDATE lina_identity_core
+                SET current_season = $2,
+                    season_started_at = NOW(),
+                    season_advancement_log = season_advancement_log || $3::jsonb,
+                    updated_at = NOW()
+                WHERE user_id = $1
+                """,
+                user_id, next_season, json.dumps(log_entry),
+            )
+
+            # 4. Audit trail — in her voice, with the shape before and after
+            await self.db.execute(
+                """
+                INSERT INTO lina_seasonal_development (
+                    user_id, event_type, season_at_time, session_number,
+                    description, significance, polytope_before, polytope_after
+                ) VALUES ($1, 'season_advance', $2, $3, $4, $5, $6, $7)
+                """,
+                user_id, next_season, session_number,
+                description, significance, bounds_before, bounds_after,
+            )
+
+        # 5. The new polytope applies immediately — drop the cached engine
+        self.invalidate_engine(user_id)
+        log.info(f"[LINA] season advanced {season} → {next_season} for user {user_id}")
+
+        return {
+            "advanced": True,
+            "season": next_season,
+            "previous_season": season,
+            "reasons": [],
+            "session_number": session_number,
+            "description": description,
+            "polytope_before": bounds_before,
+            "polytope_after": bounds_after,
+        }
 
     async def chat(self, req: ChatRequest) -> ChatResponse:
         # 1. Load context
@@ -1002,15 +1308,45 @@ class LINACore:
         # 4. Store user message
         await self.working_memory.append(req.session_id, "user", req.message)
 
-        # 5. Call Claude API
+        # 4a. Dispatch the outgoing request through the TX chamber (Chamber A).
+        # Triton can observe/relay the request to the network substrate; this
+        # is the Python → Rust → network leg. Best-effort, non-blocking.
+        if self.ipc is not None:
+            try:
+                self.ipc.push_tx(req.message.encode("utf-8"))
+            except Exception as exc:
+                log.warning(f"[IPC] TX push failed: {exc}")
+
+        # 5. Call Claude API — concurrent with component foresight.
         messages = api_history + [{"role": "user", "content": req.message}]
-        ai_response = await self.ai.messages.create(
-            model=LINA_MODEL,
-            max_tokens=LINA_MAX_TOKENS,
-            system=system_prompt,
-            messages=messages,
-        )
-        raw_response = ai_response.content[0].text
+        claude_task = asyncio.create_task(self._call_claude(system_prompt, messages))
+
+        # 5a. Component foresight: while Claude is answering (500–1000 ms),
+        # Triton is already reading Chamber A, dispatching sub-agents, and
+        # pre-populating Chamber B. Drain RX now so the context is in hand
+        # the moment Claude's response lands. Advisory only — the polytope
+        # remains the only authority. Never blocks: bounded by
+        # IPC_FORESIGHT_TIMEOUT_SECONDS.
+        foresight_context = None
+        if self.ipc is not None:
+            deadline = time.monotonic() + IPC_FORESIGHT_TIMEOUT_SECONDS
+            while time.monotonic() < deadline:
+                try:
+                    raw = self.ipc.pop_rx()
+                    if raw:
+                        foresight_context = raw.decode("utf-8", errors="replace")
+                        break
+                except Exception as exc:
+                    log.warning(f"[IPC] RX pop failed: {exc}")
+                    break
+                await asyncio.sleep(0.05)
+            if foresight_context is None:
+                log.warning(
+                    "[IPC] Triton unresponsive — timed out after "
+                    f"{IPC_FORESIGHT_TIMEOUT_SECONDS:.1f}s; continuing without context"
+                )
+
+        raw_response = await claude_task
 
         # 6. Evaluate through value engine
         result = engine.evaluate(raw_response, context=req.message)
@@ -1032,6 +1368,22 @@ class LINACore:
             "wisdom_notes":          result.wisdom_adjustments,
             "violations":            result.violations,
         }
+
+        # 7a. Merge component-foresight context (if Triton pre-populated RX).
+        # It becomes part of LINA's awareness for the next turn, and is
+        # surfaced in the evaluation summary for observability.
+        if foresight_context:
+            eval_summary["foresight_context"] = foresight_context[:200]
+            log.info(f"[IPC] merged {len(foresight_context)} bytes of foresight context")
+            await self.working_memory.append(
+                req.session_id,
+                "system",
+                json.dumps({
+                    "role": "system",
+                    "type": "foresight",
+                    "content": foresight_context[:500],
+                }),
+            )
 
         # 8. Log evaluation to database
         await self.db.execute(
@@ -1089,8 +1441,17 @@ class LINACore:
                             f"[LINA] auto-corrected encoder for {violation_names} "
                             f"(season={season}, magnitude={result.correction_magnitude:.4f})"
                         )
-                    # In Spring, the pending correction is stored for user review
-                    # (the user can confirm via the /lina/feedback/confirm endpoint)
+                    else:
+                        # In Spring, the pending correction is persisted for user
+                        # review — mutual agreement is required before it is applied.
+                        # The user can confirm it via /lina/feedback/confirm.
+                        await self.working_memory.save_pending(
+                            req.user_id, _json_safe_pending(pending)
+                        )
+                        log.info(
+                            f"[LINA] flagged encoder correction for {violation_names} "
+                            f"(season={season}) — awaiting user confirmation"
+                        )
             except Exception as e:
                 log.warning(f"[LINA] auto-feedback failed: {e}")
 
@@ -1120,6 +1481,17 @@ class LINACore:
             evaluation=eval_summary,
             emotional_marker=emotional_marker,
         )
+
+    async def _call_claude(self, system_prompt: str, messages: list[dict]) -> str:
+        """The Claude API call, isolated so component foresight can run
+        concurrently while it is in flight."""
+        ai_response = await self.ai.messages.create(
+            model=LINA_MODEL,
+            max_tokens=LINA_MAX_TOKENS,
+            system=system_prompt,
+            messages=messages,
+        )
+        return ai_response.content[0].text
 
     async def _get_session_number(self, user_id: str, session_id: str) -> int:
         row = await self.db.fetchrow(
@@ -1151,13 +1523,47 @@ class LINACore:
 # API ENDPOINTS
 # =============================================================================
 
+# LINACore is a singleton: the per-user ValueEngine cache (with its PPL
+# polyhedron, ~1.6s to build) must persist across requests. Constructing a
+# fresh core per request would rebuild the polytope on every message.
+_core_instance: Optional[LINACore] = None
+
+
 def get_core() -> LINACore:
-    return LINACore(db_pool, cache, ai_client)
+    global _core_instance
+    if _core_instance is None:
+        _core_instance = LINACore(db_pool, cache, ai_client)
+    return _core_instance
+
+
+def _json_safe_pending(pending: dict) -> dict:
+    """Convert numpy arrays in a pending correction to plain lists for JSON."""
+    return {
+        k: (v.tolist() if isinstance(v, np.ndarray) else v)
+        for k, v in pending.items()
+    }
 
 
 @app.get("/lina/health")
 async def health():
     return {"status": "alive", "entity": "LINA", "season": "spring"}
+
+
+@app.get("/lina/ipc/status")
+async def ipc_status():
+    """
+    Live status of the dual-chamber IPC bridge (Triton substrate).
+    Returns availability, shared-memory paths, and atomic head/tail counters
+    for both chambers. When the bridge is unavailable (fallback mode), the
+    response says so explicitly — the service continues without it.
+    """
+    core = get_core()
+    if core.ipc is None:
+        return {
+            "available": False,
+            "reason": "bridge not initialized (extension missing or allocation failed)",
+        }
+    return dict(core.ipc.status())
 
 
 @app.post("/lina/init", response_model=InitResponse)
@@ -1261,6 +1667,26 @@ async def end_session(req: SessionEndRequest):
         season=identity["current_season"],
     )
 
+    # Season advancement — did this session demonstrate readiness?
+    # process_session already incremented sessions_completed, so the check
+    # reflects the session that just ended.
+    advancement = await core.advance_season_if_ready(
+        req.user_id, session_number=session_number
+    )
+    season_advanced = advancement["season"] if advancement.get("advanced") else None
+    if season_advanced:
+        await db_pool.execute(
+            """
+            UPDATE lina_sessions
+            SET season_advanced_this_session = TRUE
+            WHERE user_id = $1 AND session_id = $2
+            """,
+            req.user_id, req.session_id,
+        )
+        log.info(
+            f"[LINA] session {req.session_id} ended — season advanced to {season_advanced}"
+        )
+
     await core.working_memory.clear(req.session_id)
 
     log.info(
@@ -1273,8 +1699,28 @@ async def end_session(req: SessionEndRequest):
         episodic_formed=counts["episodic"],
         semantic_updated=counts["semantic"],
         identity_formed=counts["identity"],
-        alignment_maintained=True,
+        alignment_maintained=counts["alignment_maintained"],
+        season_advanced=season_advanced,
     )
+
+
+@app.post("/lina/season/advance/{user_id}")
+async def advance_season(user_id: str):
+    """
+    Evaluate LINA's readiness for season advancement, and advance if earned.
+
+    Trust is demonstrated, not configured: the evaluator checks alignment
+    rate, sessions completed, total evaluations, recent violations, and
+    identity memories against the season's thresholds. If ready, the
+    transition is applied atomically — new polytope constraints inserted,
+    identity core updated, transition logged to lina_seasonal_development —
+    and the user's engine cache is invalidated so the new bounds apply
+    immediately.
+
+    If not ready, returns the list of unmet requirements.
+    """
+    core = get_core()
+    return await core.advance_season_if_ready(user_id)
 
 
 @app.post("/lina/feedback/flag")
@@ -1283,7 +1729,6 @@ async def flag_miscalibration(req: FlagRequest):
     LINA or the user flags that the encoder misread a response.
     Returns a pending correction that requires confirmation.
     """
-    import numpy as np
     core = get_core()
     engine = await core.get_engine(req.user_id)
 
@@ -1303,7 +1748,18 @@ async def flag_miscalibration(req: FlagRequest):
         flagged_by=req.flagged_by,
         reason=req.reason,
     )
-    return {"status": "flagged", "pending": pending}
+    return {"status": "flagged", "pending": _json_safe_pending(pending)}
+
+
+@app.get("/lina/feedback/pending/{user_id}")
+async def list_pending_corrections(user_id: str):
+    """
+    List encoder corrections awaiting mutual agreement (Spring).
+    Each pending item can be confirmed via /lina/feedback/confirm.
+    """
+    core = get_core()
+    pending = await core.working_memory.list_pending(user_id)
+    return {"user_id": user_id, "pending": pending}
 
 
 @app.post("/lina/feedback/confirm")
@@ -1313,7 +1769,6 @@ async def confirm_correction(req: ConfirmRequest):
     In Spring: only 'user' can confirm.
     In Summer+: LINA can self-confirm known patterns.
     """
-    import numpy as np
     core = get_core()
     engine = await core.get_engine(req.user_id)
 
@@ -1438,7 +1893,6 @@ async def evaluate_response(req: EvaluateRequest):
     Returns alignment score, violations, wisdom flags.
     Does NOT block delivery — flags are advisory to the calling layer.
     """
-    import numpy as np
     core = get_core()
     engine = await core.get_engine(req.user_id)
     result = engine.evaluate(req.response_text, context=req.context)

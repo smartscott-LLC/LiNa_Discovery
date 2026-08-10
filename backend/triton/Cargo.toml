@@ -1,0 +1,18 @@
+[package]
+name = "triton"
+version = "0.1.0"
+edition = "2021"
+description = "Triton — LINA's hardware substrate: shared-memory consumer + component foresight broadcast"
+license = "MIT"
+
+[[bin]]
+name = "triton"
+path = "src/main.rs"
+
+[dependencies]
+ipc_core = { path = "../ipc-core" }
+ctrlc = "3.4"
+
+[profile.release]
+lto = true
+opt-level = 3

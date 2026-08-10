@@ -1,6 +1,11 @@
 """
 Minimal neural network class for experimentation with combinatorial structures.
 This class is designed to be flexible for mapping custom architectures.
+
+Used by EmbodiedSelfModel: a small online learner that maps a 14D decision
+vector through the dimension-level topology derived from the polytope's
+combinatorial structure. It is not a pretrained classifier — it adapts
+incrementally from confirmed encoder corrections.
 """
 import numpy as np
 
@@ -10,14 +15,17 @@ class MinimalNeuralNetwork:
         self.weights = self.initialize_weights()
 
     def initialize_weights(self):
-        # Example: initialize weights based on structure nodes/edges
-        # Placeholder logic
+        # Weights are derived from the structure's node count. The network
+        # starts small and neutral (amplitude 0.05); it only becomes
+        # meaningful after adapt() updates from confirmed corrections.
         num_nodes = len(self.structure.get('nodes', [])) or 10
         weights = np.random.randn(num_nodes, num_nodes) * 0.05
         return weights
 
     def forward(self, x):
-        # Simple forward pass (placeholder)
+        # Single linear layer: the self-state modulation is squashed and
+        # blended (at 15%) by the caller, so the network influences but
+        # never dominates the polytope evaluation.
         return np.dot(x, self.weights)
 
     def adapt(self, x, target, learning_rate=0.01):
@@ -39,8 +47,9 @@ class MinimalNeuralNetwork:
         self.weights = np.clip(self.weights, -3.0, 3.0)
 
     def explore(self):
-        # Placeholder for exploratory learning logic
-        print("Exploring environment and updating reasoning...")
+        """Small exploratory perturbation of the weights, bounded and neutral."""
+        noise = np.random.randn(*self.weights.shape) * 0.01
+        self.weights = np.clip(self.weights + noise, -3.0, 3.0)
 
 if __name__ == "__main__":
     # Example usage

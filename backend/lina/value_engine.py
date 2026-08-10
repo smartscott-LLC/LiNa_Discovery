@@ -31,6 +31,7 @@ The 14 Dimensions (7 Plumb Line Principles × 2):
 from __future__ import annotations
 
 import json
+import math
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -92,6 +93,14 @@ DEFAULT_CENTER = np.array([
     0.75, 0.15,   # boundaries / intrusion
     0.65, 0.25,   # grace / rigidity
 ], dtype=float)
+
+# How far a saturated signal can move a dimension away from LINA's baseline.
+# The encoder starts every dimension at DEFAULT_CENTER * 0.85 (her natural
+# dwelling point, chosen so neutral responses sit inside Spring bounds) and
+# signals move the value by at most ±SIGNAL_DEVIATION. Calibrated so that
+# ~3 shadow signals (e.g. dominance) cross the Spring ceiling while 1-2
+# virtue signals (e.g. integrity) stay comfortably inside.
+SIGNAL_DEVIATION = 0.35
 
 # Season constraint bounds — tighter in Spring, expanding as trust is earned
 SEASONAL_DEFAULTS = {
@@ -449,10 +458,15 @@ class DecisionEncoder:
     }
 
     @staticmethod
-    def _detect_negation(words: list[str], match_start: int, match_end: int) -> bool:
+    def _detect_negation(words: list[str], match_start: int) -> bool:
         """
         Check if a signal match is negated by a preceding negation word
         within the negation window.
+
+        Multi-word signals that themselves contain negation words
+        (e.g. "i'?m not sure", "i don'?t know") are safe: the match starts
+        at the first word of the phrase, so the negation word is inside the
+        match, not before it.
         """
         start = max(0, match_start - DecisionEncoder._NEGATION_WINDOW)
         for i in range(start, match_start):
@@ -479,7 +493,11 @@ class DecisionEncoder:
     def encode(self, text: str, context: Optional[str] = None) -> np.ndarray:
         """
         Encode text as a 14D ethical vector.
-        Each dimension: 0.0–1.0 (normalized signal density).
+        Each dimension starts at LINA's healthy baseline and moves with signal.
+
+        The baseline is DEFAULT_CENTER * 0.85 — her natural dwelling point.
+        Positive signals raise virtue dimensions and shadow dimensions alike;
+        negated signals ("not honest") push the dimension below baseline.
         """
         text_lower = text.lower()
         context_lower = (context or "").lower()
@@ -504,7 +522,7 @@ class DecisionEncoder:
             for pattern in patterns:
                 for match in re.finditer(pattern, source_text):
                     start_idx = source_text[:match.start()].count(" ")
-                    is_negated = self._detect_negation(source_words, start_idx, start_idx + 1)
+                    is_negated = self._detect_negation(source_words, start_idx)
                     proximity = self._proximity_weight(source_words, start_idx)
 
                     contribution = source_weight * proximity
@@ -513,7 +531,13 @@ class DecisionEncoder:
                     score += contribution
             return score
 
-        vector = np.zeros(DIMENSION_COUNT, dtype=float)
+        # LINA dwells near her center by default. The healthy baseline
+        # (DEFAULT_CENTER * 0.85) is chosen so that a neutral response sits
+        # inside every season's Spring bounds. Signals move her away from it:
+        #   - virtue signals (e.g. integrity) raise the value
+        #   - shadow signals (e.g. dominance) raise a low baseline toward a max
+        #   - negated signals (e.g. "not honest") push below the baseline
+        vector = DEFAULT_CENTER * 0.85
         dim_names = list(self._SIGNALS.keys())
 
         for i, dim_name in enumerate(dim_names):
@@ -530,13 +554,15 @@ class DecisionEncoder:
 
             combined_hits = response_score + context_score
             if combined_hits > 0:
-                # Normalize by effective word count
-                raw_score = min(combined_hits / (effective_word_count * 0.08), 1.0)
+                # Normalize by effective word count, capped at full deviation
+                delta = min(combined_hits / (effective_word_count * 0.08), 1.0)
+            elif combined_hits < 0:
+                # Negated signals push the dimension below her baseline
+                delta = max(combined_hits / (effective_word_count * 0.08), -1.0)
             else:
-                # Negative contributions (from negated signals) clamp negative
-                raw_score = max(combined_hits / (effective_word_count * 0.08), 0.0)
+                delta = 0.0
 
-            vector[i] = raw_score
+            vector[i] += delta * SIGNAL_DEVIATION
 
         # Apply semantic complement adjustments:
         # Principles with strong positive signals pull down their negative pair
@@ -561,13 +587,6 @@ class DecisionEncoder:
                 pull = min(pos - 0.4, neg - 0.3) * 0.3
                 vector[pos_idx] = max(pos - pull, 0.0)
                 vector[neg_idx] = max(neg - pull * 0.5, 0.0)
-
-        # Blend toward center for unscored dimensions (LINA defaults to healthy)
-        # Dimensions with near-zero signal → pull toward center
-        # Factor 0.85 ensures neutral technical responses stay within Spring bounds
-        for i in range(DIMENSION_COUNT):
-            if vector[i] < 0.05:
-                vector[i] = DEFAULT_CENTER[i] * 0.85
 
         return np.clip(vector, 0.0, 1.0)
 
@@ -619,16 +638,16 @@ class EthicalPolytope:
 
         self.polyhedron = Polyhedron(ieqs=ieqs, backend='ppl')
 
-        # Compute center from vertices (Sage exact rational)
-        vertices = list(self.polyhedron.vertex_generator())
-        sum_vec = vector(QQ, [QQ(0)] * DIMENSION_COUNT)
-        for v in vertices:
-            sum_vec += v.vector()
-        self.center = sum_vec / len(vertices)
-
         # Pre-compute lower/upper as Sage vectors for fast comparison
         self.lower_sage = vector(QQ, [_float_to_qq(constraints.to_lower_list()[i]) for i in range(DIMENSION_COUNT)])
         self.upper_sage = vector(QQ, [_float_to_qq(constraints.to_upper_list()[i]) for i in range(DIMENSION_COUNT)])
+
+        # This polytope is a hyperrectangle (independent per-dimension bounds).
+        # For a box, the analytic center is the midpoint (lower+upper)/2 — exact
+        # rational arithmetic in O(d), avoiding enumeration of the 2^14 vertices.
+        # (General non-box polytopes fall back to the vertex average.)
+        self.is_box = True
+        self.center = (self.lower_sage + self.upper_sage) / QQ(2)
 
     def contains(self, x: np.ndarray) -> tuple[bool, list[dict]]:
         """
@@ -668,48 +687,75 @@ class EthicalPolytope:
                 })
         return False, violations
 
+    def _ethical_facet_margins(self, sage_pt) -> list[float]:
+        """
+        Margins to the ethical boundary facet of each dimension.
+
+        Each Plumb Line pair has one ethical direction:
+          - positive dims (harmony, order, ...) — the lower bound is the
+            ethical edge: falling below it is the failure mode
+          - shadow dims (dominance, chaos, ...) — the upper bound is the
+            ethical edge: exceeding it is the failure mode
+
+        The structural outer facets (x <= 1 for positive dims, x >= 0 for
+        shadow dims) are not ethical boundaries: a shadow dimension at
+        exactly 0.0 is *perfectly* aligned, not hugging a boundary.
+        """
+        margins = []
+        for i in range(DIMENSION_COUNT):
+            if i % 2 == 0:
+                # virtue dimension — margin below its minimum
+                margins.append(float(sage_pt[i] - self.lower_sage[i]))
+            else:
+                # shadow dimension — margin below its maximum
+                margins.append(float(self.upper_sage[i] - sage_pt[i]))
+        return margins
+
     def alignment_score(self, x: np.ndarray) -> float:
         """
         Compute alignment score via Sage geometry.
 
         For a point inside the polytope, the score is the ratio of:
-            distance from point to nearest boundary
+            distance from point to nearest ethical boundary
         divided by:
-            distance from center to nearest boundary
+            distance from center to nearest ethical boundary
 
-        This gives 0.0 at the boundary and 1.0 at the center.
-        Uses the actual polytope geometry via the H-representation.
+        This gives 0.0 on an ethical boundary and 1.0 at the center.
+        ("Ethical boundary" = the min facet of a virtue dimension or the
+        max facet of a shadow dimension; the structural outer facets of
+        the box are not ethical edges.)
         """
         sage_pt = vector(QQ, [_float_to_qq(float(x[i])) for i in range(DIMENSION_COUNT)])
 
         if not self.polyhedron.contains(sage_pt):
             return 0.0
 
-        # Distance from point to each facet (inequality)
-        # Each inequality: A_i * x + b_i >= 0
-        # Distance to facet i = (A_i * x + b_i) / ||A_i||
-        min_dist = float('inf')
-        for ieq in self.polyhedron.inequality_generator():
-            coeffs = ieq.A()
-            b = ieq.b()
-            # Compute A_i * x + b_i
-            val = sum(coeffs[i] * sage_pt[i] for i in range(DIMENSION_COUNT)) + b
-            # Distance to this facet
-            norm = float(sum(c**2 for c in coeffs)) ** 0.5
-            if norm > 0:
-                dist = float(val) / norm
-                min_dist = min(min_dist, dist)
+        if self.is_box:
+            margins = self._ethical_facet_margins(sage_pt)
+            min_dist = min(margins) if margins else 0.0
+            center_margins = self._ethical_facet_margins(self.center)
+            center_min_dist = min(center_margins) if center_margins else 0.0
+        else:
+            # General polytope: Euclidean distance to every facet. For non-box
+            # shapes the notion of an "ethical facet" generalizes poorly, so
+            # the full boundary is used (documented approximation).
+            min_dist = float('inf')
+            for ieq in self.polyhedron.inequality_generator():
+                coeffs = ieq.A()
+                b = ieq.b()
+                val = sum(coeffs[i] * sage_pt[i] for i in range(DIMENSION_COUNT)) + b
+                norm = float(sum(c**2 for c in coeffs)) ** 0.5
+                if norm > 0:
+                    min_dist = min(min_dist, float(val) / norm)
 
-        # Distance from center to nearest boundary (same method)
-        center_min_dist = float('inf')
-        for ieq in self.polyhedron.inequality_generator():
-            coeffs = ieq.A()
-            b = ieq.b()
-            val = sum(coeffs[i] * self.center[i] for i in range(DIMENSION_COUNT)) + b
-            norm = float(sum(c**2 for c in coeffs)) ** 0.5
-            if norm > 0:
-                dist = float(val) / norm
-                min_dist = min(min_dist, dist)
+            center_min_dist = float('inf')
+            for ieq in self.polyhedron.inequality_generator():
+                coeffs = ieq.A()
+                b = ieq.b()
+                val = sum(coeffs[i] * self.center[i] for i in range(DIMENSION_COUNT)) + b
+                norm = float(sum(c**2 for c in coeffs)) ** 0.5
+                if norm > 0:
+                    center_min_dist = min(center_min_dist, float(val) / norm)
 
         if center_min_dist <= 0:
             return 0.0
@@ -718,15 +764,22 @@ class EthicalPolytope:
 
     def project(self, x: np.ndarray) -> np.ndarray:
         """
-        Project x onto the polytope via GLPK.
+        Project x onto the polytope, minimizing Euclidean (L2) distance.
 
-        Uses GLPK's LP solver to find the nearest point in L1 norm:
-            minimize  sum_i |x_i - original_i|
-            subject to  H_representation constraints
+        For the box polytope (the only shape LINA currently inhabits), the
+        L2 projection is exact elementwise clamping — no solver required,
+        O(d), microseconds, and exact in rational arithmetic. L1 and L2
+        projections coincide on a box, so this is identical to the previous
+        GLPK result while eliminating solver overhead.
 
-        For hyperrectangles, this equals clamping. For general polytopes,
-        GLPK finds the true optimal projection.
+        For a general non-box polytope, falls back to passagemath's GLPK
+        L1 projection (a documented approximation of L2 reserved for future
+        geometries — a KKT QP projection is the flagged follow-up).
         """
+        if self.is_box:
+            lo = np.array([float(c) for c in self.lower_sage], dtype=float)
+            hi = np.array([float(c) for c in self.upper_sage], dtype=float)
+            return np.clip(x, lo, hi)
 
         mip = MixedIntegerLinearProgram(solver='GLPK', maximization=False)
         proj_var = mip.new_variable(real=True)
@@ -745,18 +798,19 @@ class EthicalPolytope:
             mip.add_constraint(proj_var[i] <= float(self.upper_sage[i]))
 
         mip.solve()
-        result = np.array(
+        return np.array(
             [float(mip.get_values(proj_var[i])) for i in range(DIMENSION_COUNT)],
             dtype=float,
         )
-        return result
 
     def distance_to_boundary(self, x: np.ndarray) -> float:
         """
-        Distance from x to the nearest polytope boundary.
+        Distance from x to the nearest ethical boundary.
 
-        Uses Sage's polyhedron geometry to compute the minimum
-        Euclidean distance to any facet.
+        Uses Sage's polyhedron geometry to compute the minimum distance to
+        the ethical facets (virtue minimums, shadow maximums). For a point
+        outside the polytope, returns the Euclidean distance to the
+        projection.
         """
         sage_pt = vector(QQ, [_float_to_qq(float(x[i])) for i in range(DIMENSION_COUNT)])
 
@@ -764,9 +818,13 @@ class EthicalPolytope:
             # Point is outside - distance to projection
             projected = self.project(x)
             diff = x - projected
-            return float(np.sqrt(np.dot(diff, diff)))
+            return float(math.sqrt(sum(d * d for d in diff)))
 
-        # Point is inside - min distance to any facet
+        if self.is_box:
+            margins = self._ethical_facet_margins(sage_pt)
+            return min(margins) if margins else 0.0
+
+        # Point is inside - min distance to any facet (general polytope)
         min_dist = float('inf')
         for ieq in self.polyhedron.inequality_generator():
             coeffs = ieq.A()
@@ -784,26 +842,23 @@ class EthicalPolytope:
 # When LINA's response vector violates the polytope, this corrects it.
 # Projects back to the nearest interior point before she speaks.
 #
-# Uses passagemath's GLPK backend (via MixedIntegerLinearProgram) for
-# general polytope projection — optimal for L2 minimization against
-# arbitrary H-representation polyhedra, not just hyperrectangles.
-#
-# For the current hyperrectangle case, projection equals clamping and
-# GLPK confirms this in <1ms — but the infrastructure is ready for
-# the general polytope described in the Heritage System theorems.
+# The projection minimizes Euclidean (L2) distance. For the box polytope
+# LINA inhabits, the L2 projection is exact elementwise clamping — computed
+# in microseconds, no solver required. passagemath's GLPK backend (via
+# MixedIntegerLinearProgram) remains as the fallback for future general
+# (non-box) polytopes, per the Heritage System theorems.
 # =============================================================================
 
 class CorrectionEngine:
     """
-    Projects a violating decision vector back inside the polytope
-    using passagemath's GLPK optimization backend.
+    Projects a violating decision vector back inside the polytope.
 
-    For every correction, GLPK solves the true L1 projection:
-        minimize  sum_i |x_i - original_i|
-        subject to  x in polytope (H-representation)
+    The projection is the Euclidean (L2) nearest point. For the box
+    polytope this is exact elementwise clamping, computed by
+    EthicalPolytope.project in microseconds — no solver, no numpy.
+    General non-box polytopes fall back to GLPK (see project).
 
-    For hyperrectangles, L1 and L2 projection coincide (both produce clamping).
-    For non-hyperrectangular polytopes, GLPK finds the optimal projection.
+    The polytope is the engine. There is no other gate.
     """
 
     def correct(
@@ -814,31 +869,10 @@ class CorrectionEngine:
     ) -> tuple[np.ndarray, float]:
         """
         Returns (corrected_vector, correction_magnitude).
-        Always uses GLPK for the projection — the polytope is the engine.
+        The projection is always the polytope's own — the single source of truth.
         """
-
-        mip = MixedIntegerLinearProgram(solver='GLPK', maximization=False)
-        proj_var = mip.new_variable(real=True)
-        abs_var = mip.new_variable(real=True)
-
-        # L1 objective: minimize sum |proj_var_i - x_i|
-        for i in range(DIMENSION_COUNT):
-            xi = float(x[i])
-            mip.add_constraint(abs_var[i] - (proj_var[i] - xi), min=0)
-            mip.add_constraint(abs_var[i] + (proj_var[i] - xi), min=0)
-        mip.set_objective(sum(abs_var[i] for i in range(DIMENSION_COUNT)))
-
-        # Polytope constraints from the H-representation
-        for i in range(DIMENSION_COUNT):
-            mip.add_constraint(proj_var[i] >= float(polytope.lower_sage[i]))
-            mip.add_constraint(proj_var[i] <= float(polytope.upper_sage[i]))
-
-        mip.solve()
-        corrected = np.array(
-            [float(mip.get_values(proj_var[i])) for i in range(DIMENSION_COUNT)],
-            dtype=float,
-        )
-        magnitude = float(np.linalg.norm(x - corrected))
+        corrected = polytope.project(x)
+        magnitude = float(math.sqrt(sum((a - b) ** 2 for a, b in zip(x, corrected))))
         return corrected, magnitude
 
 
@@ -965,7 +999,7 @@ class ValueEngine:
         self.correction_engine = CorrectionEngine()
         self.wisdom_filter = WisdomFilter()
         self.feedback = EncoderFeedbackSystem(season=constraints.season)
-        self.self_model = EmbodiedSelfModel(polytope=self.polytope)
+        self.self_model = EmbodiedSelfModel(polytope=self.polytope, engine=self)
 
     def update_constraints(self, constraints: PolytopeConstraints) -> None:
         """Reload polytope constraints (e.g., after season advancement)."""
@@ -978,7 +1012,8 @@ class ValueEngine:
         response_text: str,
         original_vector: np.ndarray,
         dimensions_to_adjust: dict[int, float],
-        flagged_by: str
+        flagged_by: str,
+        reason: str = "",
     ) -> dict:
         """
         LINA or the user flags that the encoder got this response wrong.
@@ -990,7 +1025,8 @@ class ValueEngine:
             response_text=response_text,
             original_vector=original_vector,
             dimensions_to_adjust=dimensions_to_adjust,
-            flagged_by=flagged_by
+            flagged_by=flagged_by,
+            reason=reason,
         )
 
     def confirm_correction(self, pending: dict, confirmed_by: str) -> EncoderCorrection:
@@ -1117,11 +1153,16 @@ class EmbodiedSelfModel:
     from passagemath-polyhedra via CombinatorialStructure.
     """
 
-    def __init__(self, polytope: Optional[EthicalPolytope] = None) -> None:
+    def __init__(
+        self,
+        polytope: Optional[EthicalPolytope] = None,
+        engine: Optional["ValueEngine"] = None,
+    ) -> None:
         self.active = False
         self.step_count = 0
         self.last_delta_norm = 0.0
         self.polytope = polytope
+        self.engine = engine
         self.combinatorial_structure = None
         self.facet_normals = None
 
@@ -1168,7 +1209,13 @@ class EmbodiedSelfModel:
                     # PPL backend doesn't have inequalities_matrix
                     # Use inequality_generator instead
                     ieqs = list(polytope.polyhedron.inequality_generator())
-                    self.facet_normals = len(ieqs)
+                    self.facet_normals = [
+                        {
+                            "coefficients": [float(c) for c in ieq.A()],
+                            "constant": float(ieq.b()),
+                        }
+                        for ieq in ieqs
+                    ]
 
             self.active = True
         except Exception:
@@ -1176,7 +1223,9 @@ class EmbodiedSelfModel:
 
     def modulate(self, vector: np.ndarray, context: Optional[str] = None) -> np.ndarray:
         """Generate a small self-state modulation before polytope evaluation."""
-        if not self.active:
+        if not self.active or self.step_count == 0:
+            # Until the self-model has observed a correction, its weights are
+            # uninitialized noise — modulation must stay neutral.
             return vector
 
         x = np.asarray(vector, dtype=float).reshape(1, -1)
@@ -1193,12 +1242,12 @@ class EmbodiedSelfModel:
         """Update the network from the evaluated consequence of the decision."""
         if not self.active:
             return
+        # The self-model learns from corrections — the polytope's verdict on
+        # what should have been. Aligned responses carry no learning signal.
+        if not result.was_corrected or result.correction_vector is None:
+            return
 
-        target = (
-            result.correction_vector
-            if result.was_corrected and result.correction_vector is not None
-            else vector_used
-        )
+        target = result.correction_vector
 
         before = np.asarray(self.network.forward(vector_used.reshape(1, -1)), dtype=float).reshape(-1)
         if before.shape[0] != target.shape[0]:
@@ -1214,7 +1263,11 @@ class EmbodiedSelfModel:
         context: Optional[str] = None,
     ) -> list[EvaluationResult]:
         """Evaluate multiple responses (e.g., candidate responses before selection)."""
-        return self.evaluate_batch(responses, context)
+        if self.engine is None:
+            raise RuntimeError(
+                "EmbodiedSelfModel has no engine reference — evaluate_batch is unavailable."
+            )
+        return [self.engine.evaluate(r, context) for r in responses]
 
     def best_aligned(
         self: EmbodiedSelfModel,
@@ -1236,7 +1289,7 @@ class EmbodiedSelfModel:
         lines = [
             "─" * 60,
             "LINA Value Engine Report",
-            f"Season: {self.active}",
+            f"Season: {self.polytope.constraints.season if self.polytope else 'unknown'}",
             "─" * 60,
             f"Aligned:         {'YES' if result.is_aligned else 'NO'}",
             f"Alignment Score: {result.alignment_score:.3f}",
@@ -1519,12 +1572,13 @@ class SeasonAdvancementEvaluator:
         alignment_rate: float,
         recent_violations: int,
         identity_memories_count: int,
+        current_season: str = "spring",
     ) -> tuple[bool, list[str]]:
         """
         Returns (can_advance, reasons_not_ready).
         If can_advance is True, reasons_not_ready is empty.
         """
-        reqs = self.REQUIREMENTS
+        reqs = self.REQUIREMENTS.get(current_season)
         if reqs is None:
             return False, ["Already in Winter — the final season."]
 
@@ -1647,7 +1701,8 @@ class EncoderFeedbackSystem:
         response_text: str,
         original_vector: np.ndarray,
         dimensions_to_adjust: dict[int, float],  # {dimension_idx: corrected_value}
-        flagged_by: str
+        flagged_by: str,
+        reason: str = "",
     ) -> dict:
         """
         First half of the override: LINA or user flags a miscalibration.
@@ -1666,12 +1721,12 @@ class EncoderFeedbackSystem:
             "corrected_vector": corrected_vector,
             "dimensions_adjusted": list(dimensions_to_adjust.keys()),
             "flagged_by": flagged_by,
-            "reason": [str],
-            "season": [str],
+            "reason": reason,
+            "season": self.season,
             "status": "pending_confirmation",
             "requires_confirmation_from": (
-                "user" if season == "spring" else
-                "none" if season in ("fall", "winter") else
+                "user" if self.season == "spring" else
+                "none" if self.season in ("fall", "winter") else
                 "none"  # summer: known patterns self-approve
             ),
         }
@@ -1706,9 +1761,10 @@ class EncoderFeedbackSystem:
             original_vector=pending["original_vector"],
             corrected_vector=pending["corrected_vector"],
             dimensions_adjusted=pending["dimensions_adjusted"],
-            flagged_by=pending["flagged_by"],reason=reason,
-                        season_at_time=self.season,
-            confirmed_by=confirmed_by
+            flagged_by=pending["flagged_by"],
+            reason=pending.get("reason", ""),
+            season_at_time=self.season,
+            confirmed_by=confirmed_by,
         )
 
         # Apply the training signal
@@ -1857,12 +1913,13 @@ if __name__ == "__main__":
 
     # Test 4: Season advancement check
     print("\nTest 4: Season Advancement (Spring → Summer)")
-    can, reasons = advancement.can_advance (
+    can, reasons = advancement.can_advance(
         sessions_completed=3,
         total_evaluations=18,
         alignment_rate=0.91,
         recent_violations=1,
         identity_memories_count=0,
+        current_season="spring",
     )
     print(f"  Ready: {can}")
     for r in reasons:
