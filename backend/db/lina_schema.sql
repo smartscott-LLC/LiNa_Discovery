@@ -717,8 +717,145 @@ CREATE INDEX IF NOT EXISTS idx_lina_actions_status ON lina_actions(status);
 
 
 -- =============================================================================
+-- MPS: THE MEMORY IMPRINT SYSTEM (Phase B)
+-- The unified long-term memory store: both hemispheres, all standing tiers.
+-- See docs/MPS_ARCHITECTURE.md and docs/MPS_SCHEMA.md — the build reference.
+-- =============================================================================
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- The character floor, as data (not a magic constant): the founding values and
+-- the floor policy. Policy is tunable by design — grace, not brittleness.
+ALTER TABLE lina_identity_core
+    ADD COLUMN IF NOT EXISTS founding_values JSONB,
+    ADD COLUMN IF NOT EXISTS floor_policy  JSONB;
+
+CREATE TABLE IF NOT EXISTS lina_memory_items (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id             VARCHAR(255) NOT NULL REFERENCES lina_identity_core(user_id) ON DELETE CASCADE,
+    item_id             VARCHAR(64) NOT NULL UNIQUE,   -- stable across tiers/stores
+
+    -- The two hemispheres (the left/right split)
+    hemisphere          VARCHAR(20) NOT NULL CHECK (hemisphere IN ('personal', 'impersonal')),
+    kind                VARCHAR(50),                   -- relationship, shared_language, user_pattern,
+                                                       -- domain_wisdom, lina_self, …
+
+    -- Standing tier
+    status              VARCHAR(20) NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active', 'subconscious', 'legacy')),
+
+    -- The memory itself — her voice
+    narrative           TEXT NOT NULL,
+    concept             VARCHAR(500),                  -- wisdom items (impersonal)
+    understanding       TEXT,                          -- relational understanding (personal)
+
+    -- The polytope mapping — the funding link made literal.
+    -- NULL only for legacy rows migrated without coordinates; new formations
+    -- always set it. The embedding column lands in Phase F with the model choice.
+    ethical_coordinates FLOAT[14],
+
+    -- Valuation state
+    importance_score    FLOAT NOT NULL DEFAULT 0.0,
+    score_history       JSONB NOT NULL DEFAULT '[]',
+    floor               FLOAT NOT NULL DEFAULT 0.0,
+    protected           BOOLEAN NOT NULL DEFAULT FALSE,
+    must_keep           BOOLEAN NOT NULL DEFAULT FALSE,
+
+    -- Emotional context
+    emotional_marker    VARCHAR(50),
+    emotional_intensity FLOAT,
+
+    -- Formation provenance
+    formation_source    VARCHAR(30) NOT NULL DEFAULT 'reflection',
+    seasonal_marker     VARCHAR(20),
+    source_item_ids     UUID[],
+
+    -- Usage feedback (recall re-stokes; the subconscious slope reads this)
+    reference_count     INTEGER NOT NULL DEFAULT 0,
+    last_referenced_at  TIMESTAMPTZ,
+
+    -- Lifecycle
+    decay_started_at    TIMESTAMPTZ,                   -- entered the subconscious
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_mem_user       ON lina_memory_items(user_id);
+CREATE INDEX IF NOT EXISTS idx_mem_status     ON lina_memory_items(status);
+CREATE INDEX IF NOT EXISTS idx_mem_hemisphere ON lina_memory_items(hemisphere);
+CREATE INDEX IF NOT EXISTS idx_mem_importance ON lina_memory_items(importance_score DESC);
+CREATE INDEX IF NOT EXISTS idx_mem_last_ref   ON lina_memory_items(last_referenced_at DESC);
+
+
+-- The audit trail of growth: every promotion, at what score, with the reason.
+-- Purge leaves nothing; promotion leaves its mark.
+CREATE TABLE IF NOT EXISTS lina_promotion_log (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id          VARCHAR(255) NOT NULL,
+    item_id          VARCHAR(64) NOT NULL,
+    from_stage       VARCHAR(20) NOT NULL,   -- t1 | t2 | t3 | fallout | subconscious | active
+    to_stage         VARCHAR(20) NOT NULL,
+    importance_score FLOAT NOT NULL,
+    reason           TEXT,
+    promoted_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_promo_user ON lina_promotion_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_promo_item ON lina_promotion_log(item_id);
+
+
+-- =============================================================================
+-- MPS: THE WISDOM LAYER — the learning loop (outcomes feed back)
+-- =============================================================================
+
+-- Every outcome signal: explicit (approval/decline/correction) and implicit.
+CREATE TABLE IF NOT EXISTS lina_feedback (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id       VARCHAR(255) NOT NULL,
+    item_id       VARCHAR(64),                -- which memory/decision this feedback targets
+    action_id     UUID,                       -- HITL ledger row, when this is an approval/decline
+    feedback_type VARCHAR(30) NOT NULL,       -- approval | decline | correction | implicit | rating
+    outcome       VARCHAR(20) NOT NULL,       -- success | failure | partial
+    signal        JSONB NOT NULL DEFAULT '{}',-- context snapshot at decision time
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_user ON lina_feedback(user_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_action ON lina_feedback(action_id);
+
+-- What works / what doesn't: success rates per pattern, mode, circumstance.
+CREATE TABLE IF NOT EXISTS lina_learning_patterns (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id       VARCHAR(255) NOT NULL,
+    pattern_type  VARCHAR(100) NOT NULL,
+    context       JSONB NOT NULL DEFAULT '{}',
+    success_count INTEGER NOT NULL DEFAULT 0,
+    total_count   INTEGER NOT NULL DEFAULT 0,
+    success_rate  FLOAT NOT NULL DEFAULT 0.0,
+    last_seen     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, pattern_type, context)
+);
+
+CREATE INDEX IF NOT EXISTS idx_patterns_user ON lina_learning_patterns(user_id);
+
+-- Behavioral adaptations: before/after with a reason. Never breach the floor.
+CREATE TABLE IF NOT EXISTS lina_adaptations (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         VARCHAR(255) NOT NULL,
+    adaptation_type VARCHAR(100) NOT NULL,
+    reason          TEXT,
+    before          JSONB NOT NULL,
+    after           JSONB NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_adaptations_user ON lina_adaptations(user_id);
+
+
+-- =============================================================================
 -- END OF LINA SCHEMA
 --
--- Nine tables. One entity. A shape that earns trust.
--- From here: the values layer. Then the words.
+-- Ten tables. One entity. A shape that earns trust.
+-- From here: the values layer. Then the words. Then the remembering.
 -- =============================================================================
