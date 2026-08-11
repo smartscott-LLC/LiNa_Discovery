@@ -685,6 +685,19 @@ class TestRecall:
         # Without embeddings, importance leads the blend.
         assert top[0]["item_id"] == "m-high"
 
+    def test_lazy_backfill_writes_vector_literal(self):
+        db = FakeDB()
+        embedder = self.FakeEmbedder()
+        # A memory with no embedding yet — the recall embeds and stores it.
+        db.fetch_rows = [self._mem_row("m-bare", "a memory without an embedding yet", 5.0)]
+        svc = self._svc(db, embedder)
+        asyncio.run(svc.recall(user_id="u1", query="a memory", limit=1))
+        backfills = [args for sql, args in db.executes if "SET embedding" in sql]
+        assert len(backfills) == 1
+        # The vector is written as its pgvector text literal, not a Python list.
+        assert isinstance(backfills[0][1], str)
+        assert backfills[0][1].startswith("[") and backfills[0][1].endswith("]")
+
     def test_inject_context_shapes_blocks(self):
         db = FakeDB()
         db.fetch_rows = [

@@ -67,9 +67,10 @@ services:
       # The likeness half of recall (Phase F) — embeddings via an
       # OpenAI-compatible endpoint; falls back to OPENROUTER_API_KEY.
       - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-}
+      - EMBEDDING_BASE_MODEL=${EMBEDDING_BASE_MODEL:-}
       - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
-      - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-}
+      - EMBEDDING_REFERER=${EMBEDDING_REFERER:-}
+      - EMBEDDING_TITLE=${EMBEDDING_TITLE:-}
       # Service configuration.
       - HOST=0.0.0.0
       - PORT=8001

@@ -7,9 +7,18 @@ together they are the two-space retrieval of the MPS: semantic similarity
 finds the text, ethical proximity finds the like moments.
 
 An OpenAI-compatible /embeddings endpoint (default: OpenRouter), so any
-embedding model behind that contract works. Failures degrade gracefully —
-recall falls back to importance + ethical proximity. The vector space is
-auxiliary; the polytope mapping is primary.
+embedding model behind that contract works. The request matches OpenRouter's
+documented contract exactly: model, input, encoding_format=float, and the
+optional ranking headers. Failures degrade gracefully — recall falls back to
+importance + ethical proximity. The vector space is auxiliary; the polytope
+mapping is primary.
+
+Environment:
+    EMBEDDING_BASE_URL    — embeddings endpoint (default: OpenRouter /api/v1)
+    EMBEDDING_BASE_MODEL  — embedding model (default: openai/text-embedding-3-small)
+    EMBEDDING_API_KEY     — embeddings key (default: OPENROUTER_API_KEY)
+    EMBEDDING_REFERER     — optional; HTTP-Referer for rankings on openrouter.ai
+    EMBEDDING_TITLE       — optional; X-OpenRouter-Title for rankings
 """
 
 from __future__ import annotations
@@ -23,7 +32,6 @@ log = logging.getLogger("lina.embeddings")
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "openai/text-embedding-3-small"
-DEFAULT_DIMENSIONS = 1536
 
 
 class EmbeddingClient:
@@ -36,20 +44,23 @@ class EmbeddingClient:
         base_url: str | None = None,
         model: str | None = None,
         api_key: str | None = None,
-        dimensions: int | None = None,
+        referer: str | None = None,
+        title: str | None = None,
         timeout: float = 10.0,
     ) -> None:
         self.base_url = (base_url or os.getenv("EMBEDDING_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
-        self.model = model or os.getenv("EMBEDDING_MODEL") or DEFAULT_MODEL
+        # Accept either the API root (…/v1) or the full endpoint (…/v1/embeddings).
+        if self.base_url.endswith("/embeddings"):
+            self.base_url = self.base_url[: -len("/embeddings")]
+        self.model = model or os.getenv("EMBEDDING_BASE_MODEL") or DEFAULT_MODEL
         self.api_key = (
             api_key
             or os.getenv("EMBEDDING_API_KEY")
             or os.getenv("OPENROUTER_API_KEY")
             or ""
         )
-        self.dimensions = int(
-            dimensions or os.getenv("EMBEDDING_DIMENSIONS") or DEFAULT_DIMENSIONS
-        )
+        self.referer = referer or os.getenv("EMBEDDING_REFERER") or ""
+        self.title = title or os.getenv("EMBEDDING_TITLE") or ""
         self.timeout = timeout
         self._client: httpx.AsyncClient | None = None
 
@@ -58,16 +69,30 @@ class EmbeddingClient:
         return bool(self.api_key)
 
     async def embed(self, text: str) -> list[float] | None:
-        """Embed text → vector. None on failure — degrade, never raise."""
+        """Embed text → vector. None on failure — degrade, never raise.
+
+        The payload matches the documented OpenRouter embeddings contract:
+        model, input, encoding_format=float. The ranking headers are sent
+        only when configured.
+        """
         text = (text or "").strip()
         if not text or not self.available:
             return None
         try:
             client = self._get_client()
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            if self.referer:
+                headers["HTTP-Referer"] = self.referer
+            if self.title:
+                headers["X-OpenRouter-Title"] = self.title
             resp = await client.post(
                 f"{self.base_url}/embeddings",
-                json={"model": self.model, "input": text, "dimensions": self.dimensions},
-                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": self.model,
+                    "input": text,
+                    "encoding_format": "float",
+                },
+                headers=headers,
             )
             resp.raise_for_status()
             data = resp.json()

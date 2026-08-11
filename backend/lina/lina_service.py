@@ -69,9 +69,10 @@ Environment variables:
     WORKSPACE_PATH      — root for approved file/command actions
                           (default: <LINA_STATE_DIR>/workspace; container: /workspace)
     EMBEDDING_BASE_URL   — embeddings endpoint (default: OpenRouter /api/v1)
-    EMBEDDING_MODEL      — embedding model (default: openai/text-embedding-3-small)
+    EMBEDDING_BASE_MODEL — embedding model (default: openai/text-embedding-3-small)
     EMBEDDING_API_KEY    — embeddings key (default: OPENROUTER_API_KEY)
-    EMBEDDING_DIMENSIONS — embedding dimension (default: 1536)
+    EMBEDDING_REFERER    — optional; HTTP-Referer for rankings on openrouter.ai
+    EMBEDDING_TITLE      — optional; X-OpenRouter-Title for rankings
     PWA_DIR             — PWA shell directory served at /pwa (default: <repo>/backend/pwa)
     LINA_COMMAND_TIMEOUT — HITL command execution timeout in seconds
                           (default: 15; read by actions.py)

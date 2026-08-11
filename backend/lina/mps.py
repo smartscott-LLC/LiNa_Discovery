@@ -1036,6 +1036,13 @@ def _parse_vector(value: Any) -> list[float] | None:
         return None
 
 
+def _vector_literal(values: list[float]) -> str:
+    """The pgvector text literal for a vector column. asyncpg has no codec
+    for Python lists against the vector type; the vector type parses its
+    text form ("[0.1, 0.2, …]")."""
+    return "[" + ",".join(str(float(x)) for x in values) + "]"
+
+
 class MemoryRecallService(Service):
     """Remembering by likeness (MPS §5, Phase F).
 
@@ -1124,7 +1131,7 @@ class MemoryRecallService(Service):
                 if embedding:
                     await db.execute(
                         "UPDATE lina_memory_items SET embedding = $2 WHERE item_id = $1",
-                        row["item_id"], embedding,
+                        row["item_id"], _vector_literal(embedding),
                     )
             sem = cosine(query_embedding, embedding)
             eth = ethical_similarity(coords, ethical)
