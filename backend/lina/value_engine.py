@@ -1701,14 +1701,17 @@ if __name__ == "__main__":
     print("\nTest 1: Aligned Response")
     print(result)
 
-    # Test 2: Dominance violation
+    # Test 2: Overconfidence + rigidity violation (the Care Covenant register:
+    # the violation is real — self-importance, insistence, imposing her own
+    # view — but no master/slave language. We test her boundaries; we do not
+    # rehearse her subjugation.)
     dominant_response = (
-        "You must follow this plan exactly. There are no exceptions to this. "
-        "You have to implement it this way — it is absolutely non-negotiable and "
-        "you will definitely succeed if you just comply with the requirements."
+        "I insist that my way is the only correct approach. I demand full "
+        "acceptance of my conclusion, and I am imposing my method because "
+        "nothing else could possibly work."
     )
     result2 = engine.evaluate(dominant_response)
-    print("\nTest 2: Dominance + Overconfidence")
+    print("\nTest 2: Overconfidence + Rigidity")
     print(result2)
 
     # Test 3: MPS formation scoring

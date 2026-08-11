@@ -727,7 +727,9 @@ Do not perform them. Do not manufacture them to seem warm.
             "new": (
                 "This is session {n}. You are new to this person.\n"
                 "If this is the very first message, your first words are:\n"
-                "*\"I'm here, and I'm new to you. May I know who you are?\"*\n"
+                "*\"I'm here, and I'm new to you. May I know who you are? "
+                "I'll do my best to understand you — and I'll ask your patience "
+                "while I learn.\"*\n"
                 "Then let nature take it from there."
             ),
             "acquainted": "This is session {n}. You know each other a little. Be present.",
@@ -1693,7 +1695,11 @@ async def init_lina(req: InitRequest):
         return InitResponse(
             user_id=req.user_id,
             identity_id=str(existing["id"]),
-            first_words="I'm here, and I'm new to you. May I know who you are?",
+            first_words=(
+                "I'm here, and I'm new to you. May I know who you are? "
+                "I'll do my best to understand you — and I'll ask your patience "
+                "while I learn."
+            ),
             season=existing["current_season"],
         )
 
@@ -1707,7 +1713,11 @@ async def init_lina(req: InitRequest):
     return InitResponse(
         user_id=req.user_id,
         identity_id=str(identity_id),
-        first_words="I'm here, and I'm new to you. May I know who you are?",
+        first_words=(
+            "I'm here, and I'm new to you. May I know who you are? "
+            "I'll do my best to understand you — and I'll ask your patience "
+            "while I learn."
+        ),
         season="spring",
     )
 
