@@ -9,6 +9,10 @@ from providers import VoicePool, VoicePoolError, build_voice_pool_from_env
 from providers.base import AIProvider
 from providers.openai_compat import OpenAICompatProvider
 
+from typing import cast
+
+import httpx
+
 results = []
 
 def check(name, fn):
@@ -17,7 +21,8 @@ def check(name, fn):
         results.append((name, "OK"))
     except Exception as e:
         results.append((name, f"FAIL: {type(e).__name__}: {e}"))
-        import traceback; traceback.print_exc()
+        import traceback
+        traceback.print_exc()
 
 
 class FakeProvider(AIProvider):
@@ -93,7 +98,8 @@ def test_semaphore_bounds_concurrency():
 def test_primary_is_first():
     async def run():
         pool = VoicePool([FakeProvider("a"), FakeProvider("b")])
-        assert pool.primary.name == "a"
+        primary = pool.primary
+        assert primary is not None and primary.name == "a"
         assert pool.names == ["a", "b"]
         assert bool(pool)
     asyncio.run(run())
@@ -103,12 +109,11 @@ def test_factory_env_chain():
     os.environ["DEEPSEEK_API_KEY"] = "k-deepseek"
     os.environ["OPENROUTER_API_KEY"] = "k-openrouter"
     os.environ.pop("GEMINI_API_KEY", None)
-    os.environ.pop("ANTHROPIC_API_KEY", None)
     os.environ.pop("AI_PROVIDERS", None)
 
     async def run():
         pool = build_voice_pool_from_env(primary="deepseek", max_concurrent=3)
-        # deepseek + openrouter have keys; gemini/claude skipped
+        # deepseek + openrouter have keys; gemini skipped
         assert pool.names == ["deepseek", "openrouter"], pool.names
         assert pool.max_concurrent == 3
     asyncio.run(run())
@@ -124,7 +129,7 @@ def test_factory_chain_override():
 
 
 def test_factory_no_keys_empty():
-    for var in ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+    for var in ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"):
         os.environ.pop(var, None)
     os.environ.pop("AI_PROVIDERS", None)
     async def run():
@@ -134,7 +139,6 @@ def test_factory_no_keys_empty():
 
 
 def test_openai_compat_request_shape():
-    import httpx
     class StubResponse:
         def __init__(self, status_code=200, body=None):
             self.status_code = status_code
@@ -154,7 +158,7 @@ def test_openai_compat_request_shape():
         provider = OpenAICompatProvider(
             base_url="https://example.com/v1", api_key="k", model="m", name="test"
         )
-        provider._client = StubClient()
+        provider._client = cast(httpx.AsyncClient, StubClient())
         text = await provider.generate("sys", [{"role": "user", "content": "q"}], max_tokens=42)
         assert text == "stub answer"
         assert captured["url"] == "/chat/completions"
@@ -179,7 +183,7 @@ def test_openai_compat_http_error():
         provider = OpenAICompatProvider(
             base_url="https://example.com/v1", api_key="k", model="m", name="test"
         )
-        provider._client = StubClient()
+        provider._client = cast(httpx.AsyncClient, StubClient())
         try:
             await provider.generate("", [])
             raise AssertionError("should have raised")

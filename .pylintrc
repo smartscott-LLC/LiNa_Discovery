@@ -1,0 +1,36 @@
+# LINA service lint configuration.
+#
+# The lina service is a FastAPI/aiomisc service with database-heavy,
+# fire-and-forget async code. These rules default to "on" and produce noise
+# that has nothing to do with correctness; they are disabled deliberately.
+# The remaining rules (unused imports/variables, undefined names, bad
+# exception handling) stay enabled — those catch real bugs.
+
+[MAIN]
+max-line-length = 120
+
+[MESSAGES CONTROL]
+disable =
+    # Structural complexity of service functions (long by nature).
+    too-many-return-statements,
+    too-many-branches,
+    too-many-statements,
+    too-many-arguments,
+    too-many-positional-arguments,
+    too-many-locals,
+    # Style that is idiomatic in this codebase.
+    magic-value-comparison,
+    implicit-string-concatenation,
+    global-statement,
+    protected-access,
+    logging-fstring-interpolation,
+    consider-using-f-string,
+    # Imports are sorted by the IDE; order rules add no value here.
+    wrong-import-order,
+    ungrouped-imports,
+    # Deliberate patterns.
+    broad-exception-caught,
+    broad-except,
+    import-outside-toplevel,
+    fixme,
+    duplicate-code

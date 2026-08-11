@@ -1,0 +1,680 @@
+# Translations template for aiomisc.
+# Copyright (C) 2021
+# This file is distributed under the same license as the aiomisc project.
+# Dmitry Orlov <me@mosquito.su>, 2022.
+msgid ""
+msgstr ""
+"Project-Id-Version:  14\n"
+"Report-Msgid-Bugs-To: me@mosquito.su\n"
+"POT-Creation-Date: 2026-02-09 00:31+0100\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: Sitkin Ivan <alvinera@yandex.ru>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/index.rst:2
+msgid "aiomisc - miscellaneous utils for asyncio"
+msgstr "aiomisc - это библиотека с различными утилитами для asyncio"
+
+#: ../../source/index.rst:4
+msgid "Coveralls"
+msgstr "Покрытие кода"
+
+#: ../../source/index.rst:8
+msgid "Actions"
+msgstr "Статус сборки"
+
+#: ../../source/index.rst:12
+msgid "Latest Version"
+msgstr "Актуальная версия"
+
+#: ../../source/index.rst:26
+msgid ""
+"As a programmer, you are no stranger to the challenges that come with "
+"building and maintaining software applications. One area that can be "
+"particularly difficult is designing the architecture of asynchronous I/O "
+"software."
+msgstr ""
+"Вам, как программисту, знакомы проблемы, связанные с разработкой и "
+"обслуживанием программ. Одним из направлений, которое может быть особенно "
+"сложным, является проектирование архитектуры программы, использующей "
+"асинхронный ввод-вывод."
+
+#: ../../source/index.rst:30
+msgid ""
+"This is where ``aiomisc`` comes in. It is a Python library that provides "
+"a collection of utility functions and classes for working with "
+"asynchronous I/O in a more intuitive and efficient way. It is built on "
+"top of the ``asyncio`` library and is designed to make it easier for "
+"developers to write asynchronous code that is both reliable and scalable."
+msgstr ""
+"Вот тут на сцену выходит ``aiomisc``. Это библиотека Python, которая "
+"предоставляет набор служебных функций и классов для работы с асинхронным "
+"IO более интуитивно понятным и эффективным способом. Она построена "
+"используя библиотеку asyncio и предназначена для облегчения написания "
+"асинхронного кода разработчиками, который является надежным и "
+"масштабируемым."
+
+#: ../../source/index.rst:36
+msgid ""
+"With ``aiomisc``, you can take advantage of powerful features like "
+":doc:`worker pools </worker_pool>`, :doc:`connection pools </pool>`, "
+":doc:`circuit breaker pattern </circuit_breaker>`, and retry mechanisms "
+"such as :doc:`asyncbackoff </async_backoff>` and :ref:`asyncretry "
+"<asyncretry>` to make your asyncio code more robust and easier to "
+"maintain. In this documentation, we'll take a closer look at what "
+"``aiomisc`` has to offer and how it can help you streamline your asyncio "
+"service development."
+msgstr ""
+"С aiomisc вы можете воспользоваться такими мощными функциями, как: "
+":doc:`worker пул </worker_pool>`, :doc:`connection пул </pool>`, "
+":doc:`шаблон «предохранитель» </circuit_breaker>`, и механизмы повторов "
+"такие как :doc:`asyncbackoff </async_backoff>` и :ref:`asyncretry "
+"<asyncretry>` чтобы сделать ваш асинхронный код более надежным и простым "
+"в обслуживании. В этой документации мы более подробно рассмотрим, что "
+"может предложить ``aiomisc`` и как он может помочь вам упростить "
+"разработку сервисов с asyncio."
+
+#: ../../source/index.rst:46
+msgid "Why use aiomisc?"
+msgstr "Зачем использовать aiomisc?"
+
+#: ../../source/index.rst:48
+msgid ""
+"**Problem:** Production asyncio applications require significant "
+"boilerplate for logging, graceful shutdown, thread pools, and error "
+"handling."
+msgstr ""
+"**Проблема:** Продакшн-приложения на asyncio требуют значительного "
+"шаблонного кода для логирования, корректного завершения, пулов потоков "
+"и обработки ошибок."
+
+#: ../../source/index.rst:51
+msgid ""
+"**Solution:** aiomisc handles infrastructure so you can focus on business"
+" logic."
+msgstr ""
+"**Решение:** aiomisc берёт на себя инфраструктуру, чтобы вы могли "
+"сосредоточиться на бизнес-логике."
+
+#: ../../source/index.rst:54
+msgid "Plain asyncio"
+msgstr "Чистый asyncio"
+
+#: ../../source/index.rst:54
+msgid "With aiomisc"
+msgstr "С aiomisc"
+
+#: ../../source/index.rst:56
+msgid "Manual signal handling"
+msgstr "Ручная обработка сигналов"
+
+#: ../../source/index.rst:56
+msgid "Built into entrypoint"
+msgstr "Встроено в entrypoint"
+
+#: ../../source/index.rst:58
+msgid "Manual logging setup"
+msgstr "Ручная настройка логирования"
+
+#: ../../source/index.rst:58
+msgid "Single parameter"
+msgstr "Один параметр"
+
+#: ../../source/index.rst:60
+msgid "Manual thread pool"
+msgstr "Ручной пул потоков"
+
+#: ../../source/index.rst:60
+msgid "Automatic + @threaded"
+msgstr "Автоматически + @threaded"
+
+#: ../../source/index.rst:62
+msgid "Try/finally cleanup"
+msgstr "Очистка в try/finally"
+
+#: ../../source/index.rst:62
+msgid "Service stop() method"
+msgstr "Метод stop() сервиса"
+
+#: ../../source/index.rst:66
+msgid "Installation"
+msgstr "Установка"
+
+#: ../../source/index.rst:68
+msgid ""
+"Installation is possible in standard ways, such as PyPI or installation "
+"from a git repository directly."
+msgstr ""
+"Возможна установка стандартными способами, такими как PyPI или установка "
+"из репозитория git напрямую."
+
+#: ../../source/index.rst:71
+msgid "Installing from PyPI_:"
+msgstr "Установка с PyPI_:"
+
+#: ../../source/index.rst:73
+msgid "pip3 install aiomisc"
+msgstr ""
+
+#: ../../source/index.rst:77
+msgid "Installing from github.com:"
+msgstr "Установка из репозитория на github.com:"
+
+#: ../../source/index.rst:79
+msgid ""
+"# Using git tool\n"
+"pip3 install git+https://github.com/aiokitchen/aiomisc.git\n"
+"\n"
+"# Alternative way using http\n"
+"pip3 install \\\n"
+"    https://github.com/aiokitchen/aiomisc/archive/refs/heads/master.zip"
+msgstr ""
+
+#: ../../source/index.rst:88
+msgid ""
+"The package contains several extras and you can install additional "
+"dependencies if you specify them in this way."
+msgstr ""
+"Пакет содержит несколько дополнений, и вы можете установить "
+"дополнительные зависимости, если вы укажете их таким образом."
+
+#: ../../source/index.rst:91
+msgid "With uvloop_:"
+msgstr "Вместе с uvloop_"
+
+#: ../../source/index.rst:93
+msgid "pip3 install \"aiomisc[uvloop]\""
+msgstr ""
+
+#: ../../source/index.rst:98
+msgid "With aiohttp_:"
+msgstr "Вместе с aiohttp_:"
+
+#: ../../source/index.rst:100
+msgid "pip3 install \"aiomisc[aiohttp]\""
+msgstr ""
+
+#: ../../source/index.rst:104
+msgid "Complete table of extras below:"
+msgstr "Полная таблица дополнений приведена ниже:"
+
+#: ../../source/index.rst:107
+msgid "example"
+msgstr "пример"
+
+#: ../../source/index.rst:107
+msgid "description"
+msgstr "описание"
+
+#: ../../source/index.rst:109
+msgid "``pip install aiomisc[aiohttp]``"
+msgstr ""
+
+#: ../../source/index.rst:109
+msgid "For running aiohttp_ applications."
+msgstr "Для запуска приложений написанных с aiohttp_."
+
+#: ../../source/index.rst:111
+msgid "``pip install aiomisc[asgi]``"
+msgstr ""
+
+#: ../../source/index.rst:111
+msgid "For running ASGI_ applications"
+msgstr "Для запуска ASGI_ приложений"
+
+#: ../../source/index.rst:113
+msgid "``pip install aiomisc[carbon]``"
+msgstr ""
+
+#: ../../source/index.rst:113
+msgid "Sending metrics to carbon_ (part of graphite_)"
+msgstr "Чтобы посылать метрики в carbon_ (часть graphite_)"
+
+#: ../../source/index.rst:115
+msgid "``pip install aiomisc[cron]``"
+msgstr ""
+
+#: ../../source/index.rst:115
+msgid "use croniter_ for scheduling tasks"
+msgstr "планирование задач с библиотекой croniter_"
+
+#: ../../source/index.rst:117
+msgid "``pip install aiomisc[raven]``"
+msgstr ""
+
+#: ../../source/index.rst:117
+msgid "Sending exceptions to sentry_ using raven_"
+msgstr "Чтобы посылать исключения в sentry_ используя raven_"
+
+#: ../../source/index.rst:119
+msgid "``pip install aiomisc[rich]``"
+msgstr ""
+
+#: ../../source/index.rst:119
+msgid "Use rich_ for logging"
+msgstr "Использовать rich_ для логирования"
+
+#: ../../source/index.rst:121
+msgid "``pip install aiomisc[uvicorn]``"
+msgstr ""
+
+#: ../../source/index.rst:121
+msgid "For running ASGI_ application using uvicorn_"
+msgstr "Для запуска ASGI_ приложений через uvicorn_"
+
+#: ../../source/index.rst:123
+msgid "``pip install aiomisc[uvloop]``"
+msgstr ""
+
+#: ../../source/index.rst:123
+msgid "use uvloop_ as a default event loop"
+msgstr "используйте uvloop_ как основной event-loop"
+
+#: ../../source/index.rst:138
+msgid "You can combine extras values by separating them with commas, for example:"
+msgstr "Вы можете комбинировать эти значения разделяя их запятыми, пример:"
+
+#: ../../source/index.rst:140
+msgid "pip3 install \"aiomisc[aiohttp,cron,rich,uvloop]\""
+msgstr ""
+
+#: ../../source/index.rst:146
+msgid "Quick Start"
+msgstr "Быстрый старт"
+
+#: ../../source/index.rst:148
+msgid ""
+"This section will cover how this library creates and uses the event loop "
+"and creates services. For more details see :doc:`/tutorial` section, and "
+"you can always refer to the :doc:`/modules` and :doc:`/api/index` "
+"sections for help."
+msgstr ""
+"В этом разделе будет рассказано, как эта библиотека создает и использует "
+"цикл обработки событий и создает службы. Конечно, обо всем тут не "
+"напишешь, но о многом можно прочитать в разделе :doc:`/tutorial`, и "
+"всегда можно обратиться к разделу :doc:`/modules` и разделу "
+":doc:`/api/index` для справки."
+
+#: ../../source/index.rst:153
+msgid "Event-loop and entrypoint"
+msgstr "Eventloop и entrypoint"
+
+#: ../../source/index.rst:155
+msgid "Let's look at this simple example first:"
+msgstr "Сначала рассмотрим этот простой пример:"
+
+#: ../../source/index.rst:157
+msgid ""
+"import asyncio\n"
+"import logging\n"
+"\n"
+"import aiomisc\n"
+"\n"
+"log = logging.getLogger(__name__)\n"
+"\n"
+"async def main():\n"
+"    log.info('Starting')\n"
+"    await asyncio.sleep(3)\n"
+"    log.info('Exiting')\n"
+"\n"
+"\n"
+"if __name__ == '__main__':\n"
+"    with aiomisc.entrypoint(log_level=\"info\", log_format=\"color\") as "
+"loop:\n"
+"        loop.run_until_complete(main())"
+msgstr ""
+
+#: ../../source/index.rst:177
+msgid ""
+"This code declares an asynchronous ``main()`` function that exits after 3"
+" seconds. It would seem nothing interesting, but the whole point is in "
+"the ``entrypoint``."
+msgstr ""
+"Этот код объявляет асинхронную функцию ``main()``, которая завершается "
+"через 3 секунды. Казалось бы, ничего интересного, но всё дело в "
+"``entrypoint``."
+
+#: ../../source/index.rst:181
+msgid ""
+"At first glance the ``entrypoint`` does not do much, it just creates an "
+"event-loop and transfers control to the user. However, under the hood, "
+"the logger is configured in a separate thread, a pool of threads is "
+"created, services are started, but more on that later as there are no "
+"services in this example."
+msgstr ""
+"На первый взгляд ``entrypoint`` делает не так уж и много — он создаёт "
+"event-loop и передаёт управление пользователю. Однако под капотом "
+"настраивается логирование в отдельном потоке, создаётся пул потоков, "
+"запускаются сервисы, но об этом позже, поскольку в данном примере "
+"сервисов нет."
+
+#: ../../source/index.rst:187
+msgid "Alternatively, you can use the standard ``asyncio.Runner``:"
+msgstr "В качестве альтернативы можно использовать стандартный ``asyncio.Runner``:"
+
+#: ../../source/index.rst:189
+msgid ""
+"import asyncio\n"
+"\n"
+"async def main():\n"
+"    await asyncio.sleep(1)\n"
+"\n"
+"if __name__ == '__main__':\n"
+"    with asyncio.Runner() as runner:\n"
+"        runner.run(main())"
+msgstr ""
+
+#: ../../source/index.rst:202
+msgid "Services"
+msgstr "Сервисы"
+
+#: ../../source/index.rst:204
+msgid ""
+"The main thing that an ``entrypoint`` does is start and gracefully stop "
+"services."
+msgstr ""
+"Главное, что делает точка входа, — это запускает и корректно "
+"останавливает «Сервисы»."
+
+#: ../../source/index.rst:207
+msgid ""
+"The service concept within this library means a class derived from the "
+"``aiomisc.Service`` class and implementing the ``async def start(self) ->"
+" None:`` method and optionally the ``async def stop(self, exc: Optional[ "
+"Exception]) -> None`` method."
+msgstr ""
+"Концепция «Сервис» в этой библиотеке означает класс, унаследованный от "
+"класса ``aiomisc.Service`` и реализующий метод ``async def start(self) ->"
+" None:``, а также, опционально, метод ``async def stop(self, exc: Optional[ "
+"Exception]) -> None``."
+
+#: ../../source/index.rst:212
+msgid ""
+"The concept of stopping a service doesn't necessarily mean pressing "
+"``Ctrl+C`` by the user, it's actually just exiting the ``entrypoint`` "
+"context manager."
+msgstr ""
+"Концепция остановки сервиса не обязательно означает нажатие "
+"пользователем клавиш ``Ctrl+C`` — на самом деле это просто выход из "
+"контекстного менеджера ``entrypoint``."
+
+#: ../../source/index.rst:215
+msgid "The example below shows what your service might look like:"
+msgstr "Пример ниже иллюстрирует, как может выглядеть ваш сервис:"
+
+#: ../../source/index.rst:217
+msgid ""
+"from aiomisc import entrypoint, Service\n"
+"\n"
+"class MyService(Service):\n"
+"    async def start(self):\n"
+"        do_something_when_start()\n"
+"\n"
+"    async def stop(self, exc):\n"
+"        do_graceful_shutdown()\n"
+"\n"
+"\n"
+"with entrypoint(MyService()) as loop:\n"
+"    loop.run_forever()"
+msgstr ""
+
+#: ../../source/index.rst:232
+msgid ""
+"The entry point can start as many instances of the service as it likes, "
+"and all of them will start concurrently."
+msgstr ""
+"Точка входа может запускать любое количество экземпляров службы, и все "
+"они будут запускаться конкурентно."
+
+#: ../../source/index.rst:235
+msgid ""
+"There is also a way if the ``start`` method is a payload for a service, "
+"and then there is no need to implement the stop method, since the running"
+" task with the ``start`` function will be canceled at the stop stage. But"
+" in this case, you will have to notify the ``entrypoint`` that the "
+"initialization of the service instance is complete and it can continue."
+msgstr ""
+"Также есть способ, если метод ``start`` является полезной нагрузкой для "
+"сервиса, и тогда нет необходимости реализовывать метод ``stop``, так как "
+"задача с функцией ``start`` будет отменена на этапе выхода из entrypoint."
+" Но в этом случае вам придется уведомить ``entrypoint`` о том, что "
+"инициализация экземпляра службы завершена и ее можно продолжить."
+
+#: ../../source/index.rst:241
+msgid "Like this:"
+msgstr "Примерно так:"
+
+#: ../../source/index.rst:243
+msgid ""
+"import asyncio\n"
+"from threading import Event\n"
+"from aiomisc import entrypoint, Service\n"
+"\n"
+"event = Event()\n"
+"\n"
+"class MyService(Service):\n"
+"    async def start(self):\n"
+"        # Send signal to entrypoint for continue running\n"
+"        self.start_event.set()\n"
+"        await asyncio.sleep(3600)\n"
+"\n"
+"\n"
+"with entrypoint(MyService()) as loop:\n"
+"    assert event.is_set()"
+msgstr ""
+
+#: ../../source/index.rst:263
+msgid ""
+"The ``entrypoint`` passes control to the body of the context manager only"
+" after all service instances have started. As mentioned above, a start is"
+" considered to be the completion of the ``start`` method or the setting "
+"of an start event with ``self.start_event.set()``."
+msgstr ""
+"``entrypoint`` передает управление телу контекстного менеджера только "
+"после того, как все экземпляры службы запущены. Как упоминалось выше, "
+"стартом считается завершение метода ``start`` или установка стартового "
+"события с помощью ``self.start_event.set()``."
+
+#: ../../source/index.rst:268
+msgid ""
+"The whole power of this library is in the set of already implemented or "
+"abstract services. Such as: :ref:`AIOHTTPService <aiohttp-service>`, "
+":ref:`ASGIService <asgi-service>`, :ref:`TCPServer <tcp-server>`, "
+":ref:`UDPServer <udp-server>`, :ref:`TCPClient <tcp-client>`, "
+":ref:`PeriodicService <periodic-service>`, :ref:`CronService <cron-"
+"service>` and so on."
+msgstr ""
+"Вся мощь этой библиотеки это набор уже реализованных или абстрактных "
+"сервисов таких как: :ref:`AIOHTTPService <aiohttp-service>`, "
+":ref:`ASGIService <asgi-service>`, :ref:`TCPServer <tcp-server>`, "
+":ref:`UDPServer <udp-server>`, :ref:`TCPClient <tcp-client>`, "
+":ref:`PeriodicService <periodic-service>`, :ref:`CronService <cron-"
+"service>` и так далее."
+
+#: ../../source/index.rst:276
+msgid ""
+"Unfortunately in this section it is not possible to pay more attention to"
+" this, please pay attention to the :doc:`/tutorial` section section, "
+"there are more examples and explanations, and of course you can always "
+"find an answer in the :doc:`/api/index` or in the source code. The "
+"authors have tried to make the source code as clear and simple as "
+"possible, so feel free to explore it."
+msgstr ""
+"К сожалению, в данном разделе нет возможности уделить этому больше "
+"внимания. Обратите внимание на раздел :doc:`/tutorial`, там больше "
+"примеров и пояснений. Ну и, конечно, вы всегда можете найти ответ в "
+":doc:`/api/index` или в исходном коде. Авторы постарались сделать "
+"исходный код максимально понятным и простым, поэтому не стесняйтесь "
+"исследовать его."
+
+#: ../../source/index.rst:284
+msgid "Versioning"
+msgstr "Версионирование"
+
+#: ../../source/index.rst:286
+msgid "This software follows `Semantic Versioning`_"
+msgstr ""
+"Это программное обеспечение следует методологиии `Семантического "
+"Версионирования`_"
+
+#: ../../source/index.rst:289
+msgid "Summary: it's given a version number MAJOR.MINOR.PATCH, increment the:"
+msgstr "Кратко: учитывая номер версии МАЖОРНАЯ.МИНОРНАЯ.ПАТЧ, следует увеличивать:"
+
+#: ../../source/index.rst:291
+msgid "MAJOR version when you make incompatible API changes"
+msgstr "МАЖОРНУЮ версию, когда сделаны обратно несовместимые изменения API."
+
+#: ../../source/index.rst:292
+msgid "MINOR version when you add functionality in a backwards compatible manner"
+msgstr ""
+"МИНОРНУЮ версию, когда вы добавляете новую функциональность, не нарушая "
+"обратной совместимости."
+
+#: ../../source/index.rst:293
+msgid "PATCH version when you make backwards compatible bug fixes"
+msgstr "ПАТЧ-версию, когда вы делаете обратно совместимые исправления."
+
+#: ../../source/index.rst:294
+msgid ""
+"Additional labels for pre-release and build metadata are available as "
+"extensions to the MAJOR.MINOR.PATCH format."
+msgstr ""
+"Дополнительные обозначения для предрелизных и билд-метаданных возможны "
+"как дополнения к МАЖОРНАЯ.МИНОРНАЯ.ПАТЧ формату."
+
+#: ../../source/index.rst:297
+msgid ""
+"In this case, the package version is assigned automatically with poem-"
+"plugins_, it using on the tag in the repository as a major and minor and "
+"the counter, which takes the number of commits between tag to the head of"
+" branch."
+msgstr ""
+"В этом проекте версия пакета назначается автоматически с помощью poem-"
+"plugins_, он использует тег в репозитории как МАЖОР и МИНОР, а также "
+"счетчик, который берет количество коммитов между тегом и головой ветки."
+
+#: ../../source/index.rst:305
+msgid "How to develop?"
+msgstr "Как разрабатывать этот проект?"
+
+#: ../../source/index.rst:307
+msgid ""
+"This project, like most open source projects, is developed by "
+"enthusiasts, you can join the development, submit issues, or send your "
+"merge requests."
+msgstr ""
+"Этот проект, как и многие другие open source проекты, разрабатывается "
+"энтузиастами, и вы можете присоединиться к разработке, создавайте issues "
+"в github или присылайте свои правки как merge request."
+
+#: ../../source/index.rst:310
+msgid ""
+"In order to start developing in this repository, you need to do the "
+"following things."
+msgstr ""
+"Чтобы начать разработку в этом репозитории, вам необходимо сделать "
+"следующее:"
+
+#: ../../source/index.rst:313
+msgid "Should be installed:"
+msgstr "Должно быть установлено"
+
+#: ../../source/index.rst:315
+msgid "Python 3.7+ as ``python3``"
+msgstr "Python 3.7+ как ``python3``"
+
+#: ../../source/index.rst:316
+msgid "Installed Poetry_ as ``poetry``"
+msgstr "Установлен Poetry_ как ``poetry``"
+
+#: ../../source/index.rst:320
+msgid "For setting up developer environment just execute:"
+msgstr "Для настройки окружения разработчика выполните:"
+
+#: ../../source/index.rst:322
+msgid ""
+"# installing all dependencies\n"
+"poetry install\n"
+"\n"
+"# setting up pre-commit hooks\n"
+"poetry run pre-commit install\n"
+"\n"
+"# adding poem-plugins to the poetry\n"
+"poetry self add poem-plugins"
+msgstr ""
+
+#~ msgid ""
+#~ "Alternatively, you can choose not to "
+#~ "use an ``entrypoint``, just create an"
+#~ " event-loop and set it as a "
+#~ "default for current thread:"
+#~ msgstr ""
+#~ "В принципе вы можете не использовать "
+#~ "точку входа, а просто создать eventloop"
+#~ " и установите его по умолчанию для"
+#~ " текущего потока:"
+
+#~ msgid ""
+#~ "import asyncio\n"
+#~ "import aiomisc\n"
+#~ "\n"
+#~ "# * Installs uvloop event loop is it's has been installed.\n"
+#~ "# * Creates and set `aiomisc.thread_pool.ThreadPoolExecutor`\n"
+#~ "#   as a default executor\n"
+#~ "# * Sets just created event-loop"
+#~ " as a current event-loop for "
+#~ "this thread.\n"
+#~ "aiomisc.new_event_loop()\n"
+#~ "\n"
+#~ "async def main():\n"
+#~ "    await asyncio.sleep(1)\n"
+#~ "\n"
+#~ "if __name__ == '__main__':\n"
+#~ "    loop = asyncio.get_event_loop()\n"
+#~ "    loop.run_until_complete(main())"
+#~ msgstr ""
+
+#~ msgid ""
+#~ "The example above is useful if "
+#~ "your code is already using an "
+#~ "implicitly created event loop, you will"
+#~ " have to modify less code, just "
+#~ "add ``aiomisc.new_event_loop()`` and all calls"
+#~ " to ``asyncio.get_event_loop()`` will return "
+#~ "the created instance."
+#~ msgstr ""
+#~ "Приведенный выше пример полезен, если в"
+#~ " вашем коде уже неявно используется "
+#~ "созданный eventloop, тогда вам придется "
+#~ "изменить меньше кода, просто добавьте "
+#~ "``aiomisc.new_event_loop()`` и все вызовы "
+#~ "``asyncio.get_event_loop()`` вернет созданный "
+#~ "экземпляр."
+
+#~ msgid ""
+#~ "However, you can do with one call."
+#~ " Following example closes implicitly "
+#~ "created asyncio event loop and install"
+#~ " a new one:"
+#~ msgstr ""
+#~ "Однако можно обойтись и одним вызовом."
+#~ " Следующий пример закрывает неявно "
+#~ "созданный eventloop asyncio и устанавливает"
+#~ " новый:"
+
+#~ msgid ""
+#~ "import asyncio\n"
+#~ "import aiomisc\n"
+#~ "\n"
+#~ "async def main():\n"
+#~ "    await asyncio.sleep(3)\n"
+#~ "\n"
+#~ "if __name__ == '__main__':\n"
+#~ "    loop = aiomisc.new_event_loop()\n"
+#~ "    loop.run_until_complete(main())"
+#~ msgstr ""

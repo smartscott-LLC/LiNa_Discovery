@@ -1,0 +1,36 @@
+# LINA service lint configuration (ruff).
+#
+# The lina service is a FastAPI/aiomisc service with database-heavy async
+# code. Default "select ALL" style runs produce noise that has nothing to do
+# with correctness; this selects the categories that catch real bugs and
+# ignores the structural/style noise of long service functions.
+
+line-length = 120
+target-version = "py312"
+extend-exclude = ["backend/lina/typings"]
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+    "E501",        # line length — handled by formatting, not linting
+    # Structural complexity of service functions (long by nature).
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR2004",
+    "PLW0603",     # global statements — aiomisc service publishing pattern
+    "BLE001",      # blind except — deliberate fire-and-forget boundaries
+    "ISC001",      # implicit string concatenation (readable in f-strings)
+    "SLF001",      # protected access — VoicePool telemetry hook
+    "SIM103", "SIM108", "SIM105",  # readability-first conditionals
+    "PLC0415",     # import-outside-toplevel (lazy imports are deliberate)
+    "B008",        # FastAPI Depends() in default args is the framework idiom
+    "C901",
+    "UP006", "UP007", "UP035",  # typing style — already modernized in code
+]
+
+[lint.per-file-ignores]
+# Tests use the sys.path shim before imports — E402/I001 are expected there.
+"backend/lina/test_*.py" = ["E402", "I001"]
+
+[lint.isort]
+# Deterministic import classification so local ruff and the IDE agree.
+known-first-party = ["actions", "metrics", "providers", "value_engine", "ipc_bridge"]
+known-third-party = ["aiomisc", "asyncpg", "fastapi", "httpx", "numpy", "pydantic", "redis"]

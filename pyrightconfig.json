@@ -1,0 +1,9 @@
+{
+  "include": ["backend/lina"],
+  "exclude": ["docs"],
+  "typeCheckingMode": "standard",
+  "extraPaths": ["backend/lina"],
+  "stubPath": "backend/lina/typings",
+  "reportUnusedExpression": "none",
+  "reportMissingImports": "none"
+}

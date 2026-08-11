@@ -23,7 +23,8 @@ def check(name, fn):
         results.append((name, "OK"))
     except Exception as e:
         results.append((name, f"FAIL: {type(e).__name__}: {e}"))
-        import traceback; traceback.print_exc()
+        import traceback
+        traceback.print_exc()
 
 
 def test_entrypoint_start_stop():
@@ -33,7 +34,6 @@ def test_entrypoint_start_stop():
     os.environ["DEEPSEEK_API_KEY"] = "k-test"
     os.environ.pop("OPENROUTER_API_KEY", None)
     os.environ.pop("GEMINI_API_KEY", None)
-    os.environ.pop("ANTHROPIC_API_KEY", None)
     os.environ.pop("AI_PROVIDERS", None)
 
     async def smoke():
@@ -41,24 +41,26 @@ def test_entrypoint_start_stop():
             lina_service.VoicePoolService(default_provider="deepseek"),
             lina_service.IPCBridgeService(),
         ]
-        async with aiomisc.entrypoint(*services) as ep:
+        async with aiomisc.entrypoint(*services):
             await asyncio.sleep(0.5)
 
-            # Services published their resources for the FastAPI app.
-            assert lina_service._voice_pool is not None
-            assert lina_service._voice_pool.primary.name == "deepseek", \
-                lina_service._voice_pool.names
-            assert lina_service._bridge_service is not None
-            assert lina_service._bridge_service.bridge is not None
-            assert lina_service._bridge_service.bridge.available()
+            # Services published their resources into the loop's Context.
+            pool = lina_service._context_get("voice_pool")
+            bridge_svc = lina_service._context_get("bridge_service")
+            assert pool is not None
+            primary = pool.primary
+            assert primary is not None and primary.name == "deepseek", pool.names
+            assert bridge_svc is not None
+            assert bridge_svc.bridge is not None
+            assert bridge_svc.bridge.available()
 
             # The voice pool is usable through the published reference.
             from providers import VoicePool
-            assert isinstance(lina_service._voice_pool, VoicePool)
+            assert isinstance(pool, VoicePool)
 
-        # After exit: pool closed and unpublished, bridge reset.
-        assert lina_service._voice_pool is None, "voice pool must be unpublished on stop"
-        assert lina_service._bridge_service is None, "bridge service must be unpublished on stop"
+        # After exit: no Context — nothing published.
+        assert lina_service._context_get("voice_pool") is None, "pool must be unpublished on stop"
+        assert lina_service._context_get("bridge_service") is None, "bridge must be unpublished on stop"
 
     asyncio.run(smoke())
 
@@ -80,20 +82,19 @@ def test_voice_pool_service_env_driven():
     # Deterministic: only these two keys exist for this test.
     os.environ["DEEPSEEK_API_KEY"] = "k-test"
     os.environ["OPENROUTER_API_KEY"] = "k-test"
-    for var in ("GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+    for var in ("GEMINI_API_KEY",):
         os.environ.pop(var, None)
     os.environ.pop("AI_PROVIDERS", None)
 
-    svc = lina_service.VoicePoolService(default_provider="openrouter", max_concurrent=7)
-    asyncio.run(svc.start())
-    try:
-        assert lina_service._voice_pool is not None
-        assert lina_service._voice_pool.names == ["openrouter", "deepseek"], \
-            lina_service._voice_pool.names
-        assert lina_service._voice_pool.max_concurrent == 7
-    finally:
-        asyncio.run(svc.stop())
-        assert lina_service._voice_pool is None
+    async def run():
+        async with aiomisc.entrypoint(
+            lina_service.VoicePoolService(default_provider="openrouter", max_concurrent=7)
+        ):
+            pool = lina_service._context_get("voice_pool")
+            assert pool is not None
+            assert pool.names == ["openrouter", "deepseek"], pool.names
+            assert pool.max_concurrent == 7
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

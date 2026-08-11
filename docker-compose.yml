@@ -50,31 +50,6 @@ services:
       timeout: 5s
       retries: 5
 
-  desktop:
-    build:
-      context: ./container
-      dockerfile: Dockerfile
-    container_name: collabsmart-desktop
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=UTC
-      - DISPLAY=:1
-      - VNC_PASSWORD=${VNC_PASSWORD:-collabsmart}
-    volumes:
-      - workspace:/workspace
-      - ./container/configs:/configs:ro
-    ports:
-      - "6080:6080"
-    networks:
-      - collabsmart
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6080"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   lina:
     build:
       context: ./backend
@@ -89,14 +64,17 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      # Service + nervous system configuration.
+      # Service configuration.
       - HOST=0.0.0.0
       - PORT=8001
       - IPC_FORESIGHT_TIMEOUT=${IPC_FORESIGHT_TIMEOUT:-2.5}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LINA_MAX_TOKENS=${LINA_MAX_TOKENS:-4096}
       - LINA_VOICE_MAX_CONCURRENT=${LINA_VOICE_MAX_CONCURRENT:-4}
+      # Her desk inside the container (state + PWA shell).
+      - LINA_STATE_DIR=/app/runtime
+      - PWA_DIR=/app/pwa
+      - WORKSPACE_PATH=/workspace
       # Optional services (opt-in).
       - METRICS_ENABLED=${METRICS_ENABLED:-0}
       - HEARTBEAT_ENABLED=${HEARTBEAT_ENABLED:-0}
@@ -110,81 +88,15 @@ services:
       dragonfly:
         condition: service_healthy
     restart: unless-stopped
+    volumes:
+      # Actions approved through the HITL ledger execute here — her shared
+      # workspace, where her files live.
+      - workspace:/workspace
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/lina/health')"]
       interval: 15s
       timeout: 5s
       retries: 5
-
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: collabsmart-backend
-    environment:
-      - NODE_ENV=production
-      - PORT=3001
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - AI_API_KEY=${AI_API_KEY:-}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
-      - DESKTOP_HOST=desktop
-      - DESKTOP_VNC_PORT=5901
-      - WORKSPACE_PATH=/workspace
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_DB=${POSTGRES_DB:-collabsmart}
-      - POSTGRES_USER=${POSTGRES_USER:-collabsmart}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-collabsmart}
-      - DRAGONFLY_HOST=dragonfly
-      - DRAGONFLY_PORT=6379
-      - DRAGONFLY_PASSWORD=${DRAGONFLY_PASSWORD:-collabsmart}
-      - DRAGONFLY_DB=${DRAGONFLY_DB:-0}
-      - AI_MODEL=${AI_MODEL:-claude-haiku-4-5-20251001}
-      - AI_MAX_TOKENS=${AI_MAX_TOKENS:-4096}
-      - ONET_API_BASE=${ONET_API_BASE:-https://services.onetcenter.org/ws}
-      - ONET_USERNAME=${ONET_USERNAME:-}
-      - ONET_PASSWORD=${ONET_PASSWORD:-}
-      - MEMORY_PROMOTION_THRESHOLD=${MEMORY_PROMOTION_THRESHOLD:-5.0}
-      - WORKING_MEMORY_TTL_HOURS=${WORKING_MEMORY_TTL_HOURS:-48}
-      - SESSION_RECORDING_ENABLED=${SESSION_RECORDING_ENABLED:-false}
-      - MAX_CONVERSATION_HISTORY=${MAX_CONVERSATION_HISTORY:-100}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - LINA_SERVICE_URL=http://lina:8001
-    volumes:
-      - workspace:/workspace
-    ports:
-      - "3001:3001"
-    networks:
-      - collabsmart
-    depends_on:
-      desktop:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      dragonfly:
-        condition: service_healthy
-      lina:
-        condition: service_healthy
-    restart: unless-stopped
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: collabsmart-frontend
-    environment:
-      - NODE_ENV=production
-      - NEXT_PUBLIC_BACKEND_URL=${NEXT_PUBLIC_BACKEND_URL:-http://localhost:3001}
-      - NEXT_PUBLIC_NOVNC_URL=${NEXT_PUBLIC_NOVNC_URL:-http://localhost:6080}
-    ports:
-      - "3000:3000"
-    networks:
-      - collabsmart
-    depends_on:
-      - backend
-    restart: unless-stopped
 
 volumes:
   workspace:

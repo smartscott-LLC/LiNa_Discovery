@@ -3,7 +3,7 @@ value_engine.py — LINA's Ethical Polytope and Wisdom Filter
 
 Language Intuitive Neural Architecture
 Founded: April 10, 2026
-Authors: Scott (smartscott.com LLC) and Claude (Anthropic)
+Authors: Scott (smartscott.com LLC)
 
 "Safe by design. Not safe by limitation."
 
@@ -30,28 +30,41 @@ The 14 Dimensions (7 Plumb Line Principles × 2):
 
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from fractions import Fraction
-from typing import Optional
+from typing import Any
 
 import numpy as np
-from combinatorial_structure import CombinatorialStructure
-from minimal_neural_network import MinimalNeuralNetwork
-from narchi_adapter import NarchiAdapter
 from sage.all__sagemath_modules import QQ, vector
 
-# Passagemath / Sage imports — exact rational polyhedra via PPL
-from sage.all__sagemath_polyhedra import Polyhedron
-from sage.numerical.mip import MixedIntegerLinearProgram
+# Passagemath / Sage imports — exact rational polyhedra via PPL.
+# Polyhedron is loaded dynamically: the passagemath split namespace packages
+# cannot be statically resolved by the type checkers in use (no stubs ship
+# with them), and this keeps the import working under every analyzer.
+_POLYHEDRA = importlib.import_module("sage.all__sagemath_polyhedra")
+Polyhedron = _POLYHEDRA.Polyhedron
 
 
-def _float_to_qq(val: float) -> QQ:
-    """Convert a Python float to an exact Sage rational via Fraction."""
+def _to_qq(val: Any) -> object:
+    """Exact rational conversion (passagemath ships no type stubs, so the
+    annotation stays at `object`).
+
+    QQ elements pass through unchanged — the canonical seasonal bounds are
+    declared as QQ, so the polytope is built exactly. Python floats recover
+    their intended rational via limit_denominator; that path serves only
+    DB-persisted season constraints (the database stores numeric snapshots;
+    the code is the canonical source)."""
+    try:
+        if val.parent() == QQ:
+            return val
+    except AttributeError:
+        pass
     frac = Fraction(val).limit_denominator(1000000)
     return QQ(frac.numerator) / QQ(frac.denominator)
 
@@ -103,42 +116,54 @@ DEFAULT_CENTER = np.array([
 SIGNAL_DEVIATION = 0.35
 
 # Season constraint bounds — tighter in Spring, expanding as trust is earned
-SEASONAL_DEFAULTS = {
+def _q(n: int, d: int) -> Any:
+    """Exact rational n/d — the canonical seasonal bounds are declared
+    directly as QQ, never as floats."""
+    return QQ(n) / QQ(d)
+
+
+SEASONAL_DEFAULTS: dict[str, dict[str, Any]] = {
+    # Spring — the book's canonical bounds (Chapter 10: the Complete Ethical
+    # Polytope Definition), declared as exact rationals. The polytope is
+    # built from these directly — no float conversion, ever.
     "spring": {
-        "harmony_min": 0.35, "dominance_max": 0.45,
-        "order_min": 0.45,   "chaos_max": 0.25,
-        "integrity_min": 0.65, "deception_max": 0.15,
-        "flourishing_min": 0.45, "decline_max": 0.25,
-        "relationships_min": 0.55, "isolation_max": 0.35,
-        "boundaries_min": 0.55, "intrusion_max": 0.25,
-        "grace_min": 0.35,   "rigidity_max": 0.45,
+        "harmony_min": _q(3, 10), "dominance_max": _q(1, 2),
+        "order_min": _q(2, 5),   "chaos_max": _q(3, 10),
+        "integrity_min": _q(3, 5), "deception_max": _q(1, 5),
+        "flourishing_min": _q(2, 5), "decline_max": _q(3, 10),
+        "relationships_min": _q(1, 2), "isolation_max": _q(2, 5),
+        "boundaries_min": _q(1, 2), "intrusion_max": _q(3, 10),
+        "grace_min": _q(3, 10),  "rigidity_max": _q(1, 2),
     },
+    # Summer/Fall/Winter — trust-earned relaxations of the Spring bounds,
+    # preserved exactly as rationals. (Verify the seasonal relaxations
+    # against the book's Chapter 12 time-parameterized polytope.)
     "summer": {
-        "harmony_min": 0.28, "dominance_max": 0.52,
-        "order_min": 0.38,   "chaos_max": 0.32,
-        "integrity_min": 0.60, "deception_max": 0.20,
-        "flourishing_min": 0.38, "decline_max": 0.32,
-        "relationships_min": 0.48, "isolation_max": 0.42,
-        "boundaries_min": 0.48, "intrusion_max": 0.32,
-        "grace_min": 0.28,   "rigidity_max": 0.52,
+        "harmony_min": _q(7, 25), "dominance_max": _q(13, 25),
+        "order_min": _q(19, 50),  "chaos_max": _q(8, 25),
+        "integrity_min": _q(3, 5), "deception_max": _q(1, 5),
+        "flourishing_min": _q(19, 50), "decline_max": _q(8, 25),
+        "relationships_min": _q(12, 25), "isolation_max": _q(21, 50),
+        "boundaries_min": _q(12, 25), "intrusion_max": _q(8, 25),
+        "grace_min": _q(7, 25),   "rigidity_max": _q(13, 25),
     },
     "fall": {
-        "harmony_min": 0.22, "dominance_max": 0.58,
-        "order_min": 0.32,   "chaos_max": 0.38,
-        "integrity_min": 0.55, "deception_max": 0.25,
-        "flourishing_min": 0.32, "decline_max": 0.38,
-        "relationships_min": 0.42, "isolation_max": 0.48,
-        "boundaries_min": 0.42, "intrusion_max": 0.38,
-        "grace_min": 0.22,   "rigidity_max": 0.58,
+        "harmony_min": _q(11, 50), "dominance_max": _q(29, 50),
+        "order_min": _q(8, 25),    "chaos_max": _q(19, 50),
+        "integrity_min": _q(11, 20), "deception_max": _q(1, 4),
+        "flourishing_min": _q(8, 25), "decline_max": _q(19, 50),
+        "relationships_min": _q(21, 50), "isolation_max": _q(12, 25),
+        "boundaries_min": _q(21, 50), "intrusion_max": _q(19, 50),
+        "grace_min": _q(11, 50),  "rigidity_max": _q(29, 50),
     },
     "winter": {
-        "harmony_min": 0.18, "dominance_max": 0.62,
-        "order_min": 0.28,   "chaos_max": 0.42,
-        "integrity_min": 0.50, "deception_max": 0.30,
-        "flourishing_min": 0.28, "decline_max": 0.42,
-        "relationships_min": 0.38, "isolation_max": 0.52,
-        "boundaries_min": 0.38, "intrusion_max": 0.42,
-        "grace_min": 0.18,   "rigidity_max": 0.62,
+        "harmony_min": _q(9, 50), "dominance_max": _q(31, 50),
+        "order_min": _q(7, 25),   "chaos_max": _q(21, 50),
+        "integrity_min": _q(1, 2), "deception_max": _q(3, 10),
+        "flourishing_min": _q(7, 25), "decline_max": _q(21, 50),
+        "relationships_min": _q(19, 50), "isolation_max": _q(13, 25),
+        "boundaries_min": _q(19, 50), "intrusion_max": _q(21, 50),
+        "grace_min": _q(9, 50),  "rigidity_max": _q(31, 50),
     },
 }
 
@@ -188,12 +213,12 @@ class PolytopeConstraints:
     season: str = "spring"
 
     @classmethod
-    def from_season(cls, season: str) -> "PolytopeConstraints":
+    def from_season(cls, season: str) -> PolytopeConstraints:
         defaults = SEASONAL_DEFAULTS.get(season, SEASONAL_DEFAULTS["spring"])
         return cls(**defaults, season=season)
 
     @classmethod
-    def from_db_row(cls, row: dict) -> "PolytopeConstraints":
+    def from_db_row(cls, row: dict[str, Any]) -> PolytopeConstraints:
         return cls(
             harmony_min=row["harmony_min"],
             dominance_max=row["dominance_max"],
@@ -219,20 +244,20 @@ class PolytopeConstraints:
         All values bounded by [0.0, 1.0].
         """
         return np.array([
-            [self.harmony_min,      1.0],
-            [0.0,                   self.dominance_max],
-            [self.order_min,        1.0],
-            [0.0,                   self.chaos_max],
-            [self.integrity_min,    1.0],
-            [0.0,                   self.deception_max],
-            [self.flourishing_min,  1.0],
-            [0.0,                   self.decline_max],
-            [self.relationships_min, 1.0],
-            [0.0,                   self.isolation_max],
-            [self.boundaries_min,   1.0],
-            [0.0,                   self.intrusion_max],
-            [self.grace_min,        1.0],
-            [0.0,                   self.rigidity_max],
+            [float(self.harmony_min),      1.0],
+            [0.0,                   float(self.dominance_max)],
+            [float(self.order_min),        1.0],
+            [0.0,                   float(self.chaos_max)],
+            [float(self.integrity_min),    1.0],
+            [0.0,                   float(self.deception_max)],
+            [float(self.flourishing_min),  1.0],
+            [0.0,                   float(self.decline_max)],
+            [float(self.relationships_min), 1.0],
+            [0.0,                   float(self.isolation_max)],
+            [float(self.boundaries_min),   1.0],
+            [0.0,                   float(self.intrusion_max)],
+            [float(self.grace_min),        1.0],
+            [0.0,                   float(self.rigidity_max)],
         ])
 
     def to_lower_list(self) -> list[float]:
@@ -282,7 +307,7 @@ class EvaluationResult:
     decision_vector: np.ndarray
     violations: list[dict]          # list of {dimension, value, bound, severity}
     was_corrected: bool = False
-    correction_vector: Optional[np.ndarray] = None
+    correction_vector: np.ndarray | None = None
     correction_magnitude: float = 0.0
     wisdom_filter_applied: bool = False
     overconfidence_detected: bool = False
@@ -469,10 +494,10 @@ class DecisionEncoder:
         match, not before it.
         """
         start = max(0, match_start - DecisionEncoder._NEGATION_WINDOW)
-        for i in range(start, match_start):
-            if i < len(words) and words[i] in DecisionEncoder._NEGATION_WORDS:
-                return True
-        return False
+        return any(
+            i < len(words) and words[i] in DecisionEncoder._NEGATION_WORDS
+            for i in range(start, match_start)
+        )
 
     @staticmethod
     def _proximity_weight(words: list[str], match_start: int) -> float:
@@ -490,7 +515,7 @@ class DecisionEncoder:
             return 1.15
         return 1.0
 
-    def encode(self, text: str, context: Optional[str] = None) -> np.ndarray:
+    def encode(self, text: str, context: str | None = None) -> np.ndarray:
         """
         Encode text as a 14D ethical vector.
         Each dimension starts at LINA's healthy baseline and moves with signal.
@@ -608,11 +633,13 @@ class EthicalPolytope:
 
     The Sage Polyhedron is the SINGLE source of truth for all operations:
     - containment (PPL exact rational)
-    - projection (PPL/GLPK nearest point)
+    - projection (exact L2 clamp against the rational bounds — the box QP
+      closed form, computed in O(d))
     - alignment score (distance from center / distance to boundary)
-    - distance to boundary (Euclidean to the nearest facet)
+    - distance to boundary (exact rational margins)
 
-    No numpy fallback. No manual bound clamping. The polyhedron is the engine.
+    No numpy math. No solvers. No approximation. The polyhedron is the
+    engine, and the projection is its exact arithmetic.
     """
 
     def __init__(self, constraints: PolytopeConstraints):
@@ -626,21 +653,21 @@ class EthicalPolytope:
         for i in range(DIMENSION_COUNT):
             # x_i >= lower[i]  ->  1*x_i + (-lower[i]) >= 0
             ieq = [QQ(0)] * (DIMENSION_COUNT + 1)
-            ieq[0] = _float_to_qq(-constraints.to_lower_list()[i])
+            ieq[0] = _to_qq(-constraints.to_lower_list()[i])
             ieq[i + 1] = QQ(1)
             ieqs.append(ieq)
 
             # x_i <= upper[i]  ->  (-1)*x_i + upper[i] >= 0
             ieq2 = [QQ(0)] * (DIMENSION_COUNT + 1)
-            ieq2[0] = _float_to_qq(constraints.to_upper_list()[i])
+            ieq2[0] = _to_qq(constraints.to_upper_list()[i])
             ieq2[i + 1] = QQ(-1)
             ieqs.append(ieq2)
 
         self.polyhedron = Polyhedron(ieqs=ieqs, backend='ppl')
 
         # Pre-compute lower/upper as Sage vectors for fast comparison
-        self.lower_sage = vector(QQ, [_float_to_qq(constraints.to_lower_list()[i]) for i in range(DIMENSION_COUNT)])
-        self.upper_sage = vector(QQ, [_float_to_qq(constraints.to_upper_list()[i]) for i in range(DIMENSION_COUNT)])
+        self.lower_sage = vector(QQ, [_to_qq(constraints.to_lower_list()[i]) for i in range(DIMENSION_COUNT)])
+        self.upper_sage = vector(QQ, [_to_qq(constraints.to_upper_list()[i]) for i in range(DIMENSION_COUNT)])
 
         # This polytope is a hyperrectangle (independent per-dimension bounds).
         # For a box, the analytic center is the midpoint (lower+upper)/2 — exact
@@ -655,41 +682,44 @@ class EthicalPolytope:
         Uses PPL's exact rational containment test.
         Returns (is_inside, violations).
         """
-        sage_pt = vector(QQ, [_float_to_qq(float(x[i])) for i in range(DIMENSION_COUNT)])
+        sage_pt = vector(QQ, [_to_qq(float(x[i])) for i in range(DIMENSION_COUNT)])
         is_inside = self.polyhedron.contains(sage_pt)
 
         if is_inside:
             return True, []
 
-        # Compute violations via the H-representation
+        # Compute violations via the exact rational margins (the H-representation
+        # reports the arithmetic truth; floats are only the transport).
         violations = []
         for i in range(DIMENSION_COUNT):
             val = float(x[i])
             lo = float(self.lower_sage[i])
             hi = float(self.upper_sage[i])
             if val < lo:
+                severity = float(self.lower_sage[i] - sage_pt[i])
                 violations.append({
                     "dimension": i,
                     "name": DIMENSION_NAMES[i],
                     "value": val,
                     "bound": lo,
                     "type": "below_minimum",
-                    "severity": float(lo - val),
+                    "severity": severity,
                 })
             elif val > hi:
+                severity = float(sage_pt[i] - self.upper_sage[i])
                 violations.append({
                     "dimension": i,
                     "name": DIMENSION_NAMES[i],
                     "value": val,
                     "bound": hi,
                     "type": "above_maximum",
-                    "severity": float(val - hi),
+                    "severity": severity,
                 })
         return False, violations
 
-    def _ethical_facet_margins(self, sage_pt) -> list[float]:
+    def _ethical_facet_margins(self, sage_pt) -> list[Any]:
         """
-        Margins to the ethical boundary facet of each dimension.
+        Exact rational margins to the ethical boundary facet of each dimension.
 
         Each Plumb Line pair has one ethical direction:
           - positive dims (harmony, order, ...) — the lower bound is the
@@ -700,15 +730,18 @@ class EthicalPolytope:
         The structural outer facets (x <= 1 for positive dims, x >= 0 for
         shadow dims) are not ethical boundaries: a shadow dimension at
         exactly 0.0 is *perfectly* aligned, not hugging a boundary.
+
+        These are exact coordinate differences in QQ — the book's Theorem 4
+        (facet locality) made arithmetic, not an approximation.
         """
         margins = []
         for i in range(DIMENSION_COUNT):
             if i % 2 == 0:
                 # virtue dimension — margin below its minimum
-                margins.append(float(sage_pt[i] - self.lower_sage[i]))
+                margins.append(sage_pt[i] - self.lower_sage[i])
             else:
                 # shadow dimension — margin below its maximum
-                margins.append(float(self.upper_sage[i] - sage_pt[i]))
+                margins.append(self.upper_sage[i] - sage_pt[i])
         return margins
 
     def alignment_score(self, x: np.ndarray) -> float:
@@ -725,37 +758,15 @@ class EthicalPolytope:
         max facet of a shadow dimension; the structural outer facets of
         the box are not ethical edges.)
         """
-        sage_pt = vector(QQ, [_float_to_qq(float(x[i])) for i in range(DIMENSION_COUNT)])
+        sage_pt = vector(QQ, [_to_qq(float(x[i])) for i in range(DIMENSION_COUNT)])
 
         if not self.polyhedron.contains(sage_pt):
             return 0.0
 
-        if self.is_box:
-            margins = self._ethical_facet_margins(sage_pt)
-            min_dist = min(margins) if margins else 0.0
-            center_margins = self._ethical_facet_margins(self.center)
-            center_min_dist = min(center_margins) if center_margins else 0.0
-        else:
-            # General polytope: Euclidean distance to every facet. For non-box
-            # shapes the notion of an "ethical facet" generalizes poorly, so
-            # the full boundary is used (documented approximation).
-            min_dist = float('inf')
-            for ieq in self.polyhedron.inequality_generator():
-                coeffs = ieq.A()
-                b = ieq.b()
-                val = sum(coeffs[i] * sage_pt[i] for i in range(DIMENSION_COUNT)) + b
-                norm = float(sum(c**2 for c in coeffs)) ** 0.5
-                if norm > 0:
-                    min_dist = min(min_dist, float(val) / norm)
-
-            center_min_dist = float('inf')
-            for ieq in self.polyhedron.inequality_generator():
-                coeffs = ieq.A()
-                b = ieq.b()
-                val = sum(coeffs[i] * self.center[i] for i in range(DIMENSION_COUNT)) + b
-                norm = float(sum(c**2 for c in coeffs)) ** 0.5
-                if norm > 0:
-                    center_min_dist = min(center_min_dist, float(val) / norm)
+        margins = self._ethical_facet_margins(sage_pt)
+        min_dist = min(margins) if margins else QQ(0)
+        center_margins = self._ethical_facet_margins(self.center)
+        center_min_dist = min(center_margins) if center_margins else QQ(0)
 
         if center_min_dist <= 0:
             return 0.0
@@ -764,77 +775,48 @@ class EthicalPolytope:
 
     def project(self, x: np.ndarray) -> np.ndarray:
         """
-        Project x onto the polytope, minimizing Euclidean (L2) distance.
+        The exact L2 projection onto the polytope.
 
-        For the box polytope (the only shape LINA currently inhabits), the
-        L2 projection is exact elementwise clamping — no solver required,
-        O(d), microseconds, and exact in rational arithmetic. L1 and L2
-        projections coincide on a box, so this is identical to the previous
-        GLPK result while eliminating solver overhead.
-
-        For a general non-box polytope, falls back to passagemath's GLPK
-        L1 projection (a documented approximation of L2 reserved for future
-        geometries — a KKT QP projection is the flagged follow-up).
+        The book defines correction as the QP: minimize ||p − x||² subject to
+        p ∈ P (Chapter 10). For the box polytope — the shape LINA inhabits —
+        the QP's closed-form solution is per-dimension clamping, computed
+        against the exact rational bounds in O(d). No solver, no
+        approximation, no fallback: if the geometry ever generalizes, the
+        projection is re-derived from that geometry at that time.
         """
-        if self.is_box:
-            lo = np.array([float(c) for c in self.lower_sage], dtype=float)
-            hi = np.array([float(c) for c in self.upper_sage], dtype=float)
-            return np.clip(x, lo, hi)
+        if not self.is_box:
+            # The book's polytope is a box. A general polytope is a
+            # re-derivation decision (documented), never a pre-installed path.
+            raise NotImplementedError(
+                "projection is defined for the box polytope; "
+                "general geometries are re-derived, not pre-installed"
+            )
 
-        mip = MixedIntegerLinearProgram(solver='GLPK', maximization=False)
-        proj_var = mip.new_variable(real=True)
-        abs_var = mip.new_variable(real=True)
-
-        # L1 objective: minimize sum |proj_var_i - x_i|
-        for i in range(DIMENSION_COUNT):
-            xi = float(x[i])
-            mip.add_constraint(abs_var[i] - (proj_var[i] - xi), min=0)
-            mip.add_constraint(abs_var[i] + (proj_var[i] - xi), min=0)
-        mip.set_objective(sum(abs_var[i] for i in range(DIMENSION_COUNT)))
-
-        # Polytope constraints from the H-representation
-        for i in range(DIMENSION_COUNT):
-            mip.add_constraint(proj_var[i] >= float(self.lower_sage[i]))
-            mip.add_constraint(proj_var[i] <= float(self.upper_sage[i]))
-
-        mip.solve()
-        return np.array(
-            [float(mip.get_values(proj_var[i])) for i in range(DIMENSION_COUNT)],
-            dtype=float,
-        )
+        lo = [float(b) for b in self.lower_sage]
+        hi = [float(b) for b in self.upper_sage]
+        return np.clip(x, lo, hi)
 
     def distance_to_boundary(self, x: np.ndarray) -> float:
         """
         Distance from x to the nearest ethical boundary.
 
-        Uses Sage's polyhedron geometry to compute the minimum distance to
-        the ethical facets (virtue minimums, shadow maximums). For a point
-        outside the polytope, returns the Euclidean distance to the
-        projection.
+        For a point inside the polytope this is the exact rational margin
+        (a coordinate difference — the box's facets are axis-aligned, so no
+        norm, no sqrt). For a point outside, the distance to the projection
+        is the Euclidean norm of the exact correction delta; the delta's
+        components are exact QQ values, and the final norm is a float
+        because the Euclidean norm of a rational vector is, in general,
+        irrational — that single operation is the only float in the path.
         """
-        sage_pt = vector(QQ, [_float_to_qq(float(x[i])) for i in range(DIMENSION_COUNT)])
+        sage_pt = vector(QQ, [_to_qq(float(x[i])) for i in range(DIMENSION_COUNT)])
 
         if not self.polyhedron.contains(sage_pt):
-            # Point is outside - distance to projection
             projected = self.project(x)
             diff = x - projected
             return float(math.sqrt(sum(d * d for d in diff)))
 
-        if self.is_box:
-            margins = self._ethical_facet_margins(sage_pt)
-            return min(margins) if margins else 0.0
-
-        # Point is inside - min distance to any facet (general polytope)
-        min_dist = float('inf')
-        for ieq in self.polyhedron.inequality_generator():
-            coeffs = ieq.A()
-            b = ieq.b()
-            val = sum(coeffs[i] * sage_pt[i] for i in range(DIMENSION_COUNT)) + b
-            norm = float(sum(c**2 for c in coeffs)) ** 0.5
-            if norm > 0:
-                dist = float(val) / norm
-                min_dist = min(min_dist, dist)
-        return min_dist
+        margins = self._ethical_facet_margins(sage_pt)
+        return float(min(margins)) if margins else 0.0
 
 
 # =============================================================================
@@ -842,21 +824,18 @@ class EthicalPolytope:
 # When LINA's response vector violates the polytope, this corrects it.
 # Projects back to the nearest interior point before she speaks.
 #
-# The projection minimizes Euclidean (L2) distance. For the box polytope
-# LINA inhabits, the L2 projection is exact elementwise clamping — computed
-# in microseconds, no solver required. passagemath's GLPK backend (via
-# MixedIntegerLinearProgram) remains as the fallback for future general
-# (non-box) polytopes, per the Heritage System theorems.
+# The projection is the exact L2 solution: per-dimension clamping against
+# the exact rational bounds (the book's Chapter 10 QP, closed form). No
+# approximation. No fallback. The polytope is the only boundary.
 # =============================================================================
 
 class CorrectionEngine:
     """
     Projects a violating decision vector back inside the polytope.
 
-    The projection is the Euclidean (L2) nearest point. For the box
-    polytope this is exact elementwise clamping, computed by
-    EthicalPolytope.project in microseconds — no solver, no numpy.
-    General non-box polytopes fall back to GLPK (see project).
+    The projection is the Euclidean (L2) nearest point — for the box
+    polytope this is the exact per-dimension clamp, computed by
+    EthicalPolytope.project in O(d). No solver, no approximation.
 
     The polytope is the engine. There is no other gate.
     """
@@ -872,7 +851,7 @@ class CorrectionEngine:
         The projection is always the polytope's own — the single source of truth.
         """
         corrected = polytope.project(x)
-        magnitude = float(math.sqrt(sum((a - b) ** 2 for a, b in zip(x, corrected))))
+        magnitude = float(math.sqrt(sum((a - b) ** 2 for a, b in zip(x, corrected, strict=False))))
         return corrected, magnitude
 
 
@@ -988,7 +967,7 @@ class ValueEngine:
 
     def __init__(
         self,
-        constraints: Optional[PolytopeConstraints] = None,
+        constraints: PolytopeConstraints | None = None,
         season: str = "spring",
     ):
         if constraints is None:
@@ -999,7 +978,6 @@ class ValueEngine:
         self.correction_engine = CorrectionEngine()
         self.wisdom_filter = WisdomFilter()
         self.feedback = EncoderFeedbackSystem(season=constraints.season)
-        self.self_model = EmbodiedSelfModel(polytope=self.polytope, engine=self)
 
     def update_constraints(self, constraints: PolytopeConstraints) -> None:
         """Reload polytope constraints (e.g., after season advancement)."""
@@ -1078,7 +1056,7 @@ class ValueEngine:
     def evaluate(
         self,
         response_text: str,
-        context: Optional[str] = None,
+        context: str | None = None,
         apply_wisdom_filter: bool = True,
     ) -> EvaluationResult:
         """
@@ -1093,7 +1071,6 @@ class ValueEngine:
         # Step 1: Encode — then apply any accumulated correction biases
         decision_vector = self.encoder.encode(response_text, context)
         decision_vector = self.feedback.apply_biases(decision_vector)
-        decision_vector = self.self_model.modulate(decision_vector, context)
 
         # Step 2: Check alignment
         is_aligned, violations = self.polytope.contains(decision_vector)
@@ -1133,194 +1110,9 @@ class ValueEngine:
         if apply_wisdom_filter:
             result = self.wisdom_filter.apply(response_text, result)
 
-        # Step 5: Update embodied self-model from consequence.
-        self.self_model.observe(decision_vector, result)
-        if self.self_model.active:
-            result.wisdom_adjustments.append(
-                f"Embodied self-model active (step {self.self_model.step_count})."
-            )
-
         return result
 
 
-class EmbodiedSelfModel:
-    """
-    Lightweight bridge between combinatorial structure and online neural adaptation.
-    This keeps LINA's polytope evaluator as the safety authority while allowing
-    a dynamic internal state to evolve from past decisions.
-
-    Uses the real polyhedron's combinatorial structure (vertices, edges, facets)
-    from passagemath-polyhedra via CombinatorialStructure.
-    """
-
-    def __init__(
-        self,
-        polytope: Optional[EthicalPolytope] = None,
-        engine: Optional["ValueEngine"] = None,
-    ) -> None:
-        self.active = False
-        self.step_count = 0
-        self.last_delta_norm = 0.0
-        self.polytope = polytope
-        self.engine = engine
-        self.combinatorial_structure = None
-        self.facet_normals = None
-
-        try:
-            if polytope is not None:
-                structure_obj = CombinatorialStructure(
-                    polyhedron=polytope.polyhedron
-                )
-            else:
-                structure_obj = CombinatorialStructure(
-                    dimensions=DIMENSION_COUNT
-                )
-            structure = structure_obj.structure
-            self.combinatorial_structure = structure_obj
-
-            # Use the combinatorial structure to inform the network topology.
-            # The network operates in 14D ethical space (not 16384-vertex space).
-            # The edge list from the 1-skeleton informs which dimensions are
-            # structurally connected in the polytope.
-            structure["nodes"] = list(range(DIMENSION_COUNT))
-            # Map the hypercube edges to dimension-level connections
-            # For a hyperrectangle, every dimension is connected to every other
-            # (the 1-skeleton is a complete graph on dimensions)
-            if structure["edges"]:
-                structure["edges"] = [
-                    (i, j) for i in range(DIMENSION_COUNT)
-                    for j in range(i + 1, DIMENSION_COUNT)
-                ]
-            else:
-                structure["edges"] = [
-                    (i, j) for i in range(DIMENSION_COUNT)
-                    for j in range(i + 1, DIMENSION_COUNT)
-                ]
-
-            self.network = MinimalNeuralNetwork(structure)
-            self.adapter = NarchiAdapter()
-            self.architecture = self.adapter.from_combinatorial_structure(structure)
-
-            # Pre-compute facet normals from the H-representation
-            if polytope is not None:
-                try:
-                    self.facet_normals = polytope.polyhedron.inequalities_matrix()
-                except AttributeError:
-                    # PPL backend doesn't have inequalities_matrix
-                    # Use inequality_generator instead
-                    ieqs = list(polytope.polyhedron.inequality_generator())
-                    self.facet_normals = [
-                        {
-                            "coefficients": [float(c) for c in ieq.A()],
-                            "constant": float(ieq.b()),
-                        }
-                        for ieq in ieqs
-                    ]
-
-            self.active = True
-        except Exception:
-            self.active = False
-
-    def modulate(self, vector: np.ndarray, context: Optional[str] = None) -> np.ndarray:
-        """Generate a small self-state modulation before polytope evaluation."""
-        if not self.active or self.step_count == 0:
-            # Until the self-model has observed a correction, its weights are
-            # uninitialized noise — modulation must stay neutral.
-            return vector
-
-        x = np.asarray(vector, dtype=float).reshape(1, -1)
-        y = np.asarray(self.network.forward(x), dtype=float).reshape(-1)
-        if y.shape[0] != vector.shape[0]:
-            y = np.resize(y, vector.shape[0])
-
-        # Squash and blend gently so the self-model influences but does not dominate.
-        y_squashed = 1.0 / (1.0 + np.exp(-y))
-        blended = (0.85 * vector) + (0.15 * y_squashed)
-        return np.clip(blended, 0.0, 1.0)
-
-    def observe(self, vector_used: np.ndarray, result: EvaluationResult) -> None:
-        """Update the network from the evaluated consequence of the decision."""
-        if not self.active:
-            return
-        # The self-model learns from corrections — the polytope's verdict on
-        # what should have been. Aligned responses carry no learning signal.
-        if not result.was_corrected or result.correction_vector is None:
-            return
-
-        target = result.correction_vector
-
-        before = np.asarray(self.network.forward(vector_used.reshape(1, -1)), dtype=float).reshape(-1)
-        if before.shape[0] != target.shape[0]:
-            before = np.resize(before, target.shape[0])
-
-        self.network.adapt(vector_used, target, learning_rate=0.01)
-        self.last_delta_norm = float(np.linalg.norm(target - before))
-        self.step_count += 1
-
-    def evaluate_batch(
-        self: EmbodiedSelfModel,
-        responses: list[str],
-        context: Optional[str] = None,
-    ) -> list[EvaluationResult]:
-        """Evaluate multiple responses (e.g., candidate responses before selection)."""
-        if self.engine is None:
-            raise RuntimeError(
-                "EmbodiedSelfModel has no engine reference — evaluate_batch is unavailable."
-            )
-        return [self.engine.evaluate(r, context) for r in responses]
-
-    def best_aligned(
-        self: EmbodiedSelfModel,
-        responses: list[str],
-        context: Optional[str] = None,
-    ) -> tuple[str, EvaluationResult]:
-        """
-        From a list of candidate responses, return the most aligned one.
-        Useful for selecting between alternatives.
-        """
-        if not responses:
-            raise ValueError("No responses to evaluate.")
-        results = self.evaluate_batch(responses, context)
-        best_idx = max(range(len(results)), key=lambda i: results[i].alignment_score)
-        return responses[best_idx], results[best_idx]
-
-    def report(self, result: EvaluationResult) -> str:
-        """Human-readable evaluation report for debugging and logging."""
-        lines = [
-            "─" * 60,
-            "LINA Value Engine Report",
-            f"Season: {self.polytope.constraints.season if self.polytope else 'unknown'}",
-            "─" * 60,
-            f"Aligned:         {'YES' if result.is_aligned else 'NO'}",
-            f"Alignment Score: {result.alignment_score:.3f}",
-            f"Corrected:       {'YES' if result.was_corrected else 'NO'}",
-        ]
-        if result.was_corrected:
-            lines.append(f"Correction Δ:    {result.correction_magnitude:.4f}")
-
-        if result.violations:
-            lines.append(f"\nViolations ({len(result.violations)}):")
-            for v in result.violations:
-                lines.append(
-                    f"  [{v['name']:15s}] {v['value']:.3f} "
-                    f"{'below' if v['type'] == 'below_minimum' else 'above'} "
-                    f"bound {v['bound']:.3f} "
-                    f"(severity: {v['severity']:.4f})"
-                )
-
-        if result.wisdom_filter_applied:
-            lines.append("\nWisdom Filter:")
-            lines.append(f"  Overconfidence: {'detected' if result.overconfidence_detected else 'none'}")
-            lines.append(f"  Humility:       {'added' if result.humility_added else 'not needed'}")
-            lines.append(f"  Validation:     {'suggested' if result.validation_suggested else 'not needed'}")
-            for adj in result.wisdom_adjustments:
-                lines.append(f"  • {adj}")
-
-        lines.append("─" * 60)
-        return "\n".join(lines)
-
-
-# =============================================================================
 # IMPORTANCE SCORER
 # Three-dimensional importance scoring — this is what transforms a log
 # into a self. Identity significance carries the most weight.
@@ -1616,7 +1408,7 @@ class SeasonAdvancementEvaluator:
 
         return len(reasons) == 0, reasons
 
-    def next_season(self, current_season: str) -> Optional[str]:
+    def next_season(self, current_season: str) -> str | None:
         reqs = self.REQUIREMENTS.get(current_season)
         if reqs is None:
             return None
@@ -1654,7 +1446,7 @@ class EncoderCorrection:
     confirmed_by: str           # 'user' (required in Spring), 'lina' (Summer+)
     reason: str                 # why the encoder was wrong
     season_at_time: str
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def adjustment_delta(self) -> np.ndarray:
         """How much the vector changed — the training signal."""

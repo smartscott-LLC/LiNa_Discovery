@@ -1,0 +1,18 @@
+{
+  "name": "LINA — Language Intuitive Neural Architecture",
+  "short_name": "LINA",
+  "description": "LINA's desktop home — chat, actions, telemetry, and her workspace.",
+  "start_url": "/pwa/",
+  "scope": "/pwa/",
+  "display": "standalone",
+  "background_color": "#0a0a0f",
+  "theme_color": "#7c3aed",
+  "icons": [
+    {
+      "src": "/pwa/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

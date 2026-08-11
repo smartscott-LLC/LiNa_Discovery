@@ -682,8 +682,43 @@ FROM lina_identity_core ic;
 
 
 -- =============================================================================
+-- TABLE 9: LINA_ACTIONS
+-- Human-in-the-loop action ledger — she proposes, you approve/reject/modify,
+-- everything is audited. This is the boundary where her agency meets your
+-- consent. Nothing touches the workspace or runs a command without a row
+-- here reaching "approved".
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS lina_actions (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         VARCHAR(255) NOT NULL,
+
+    -- What she wants to do
+    action_type     VARCHAR(40) NOT NULL CHECK (action_type IN (
+        'file_read', 'file_write', 'command', 'tool', 'opfs_read', 'opfs_write'
+    )),
+    description     TEXT NOT NULL,
+    path            TEXT,
+    payload         JSONB DEFAULT '{}',
+    workspace       TEXT DEFAULT '/workspace',
+
+    -- Lifecycle: pending → approved → executed | failed
+    --                      → rejected
+    status          VARCHAR(20) NOT NULL DEFAULT 'pending',
+    proposed_at     TIMESTAMPTZ DEFAULT NOW(),
+    resolved_at     TIMESTAMPTZ,
+    executed_output TEXT,
+    error           TEXT,
+    audit           JSONB DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_lina_actions_user ON lina_actions(user_id);
+CREATE INDEX IF NOT EXISTS idx_lina_actions_status ON lina_actions(status);
+
+
+-- =============================================================================
 -- END OF LINA SCHEMA
 --
--- Seven tables. One entity. A shape that earns trust.
+-- Nine tables. One entity. A shape that earns trust.
 -- From here: the values layer. Then the words.
 -- =============================================================================

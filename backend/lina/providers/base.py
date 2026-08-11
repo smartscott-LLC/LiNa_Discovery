@@ -17,6 +17,9 @@ class AIProvider(ABC):
 
     LINA speaks through whichever provider is injected at runtime. The rest
     of the system never names a provider — it only knows this contract.
+    ``base_url``/``model`` are the universal knobs every adapter accepts;
+    concrete providers may ignore either (or require the key that activates
+    them).
     """
 
     #: Stable identifier used by configuration (AI_PROVIDER / AI_PROVIDERS).
@@ -24,6 +27,10 @@ class AIProvider(ABC):
 
     #: Human-readable summary for logs and observability.
     label: str = "abstract"
+
+    def __init__(self, base_url: str | None = None, model: str | None = None) -> None:
+        self.base_url = base_url
+        self.model = model
 
     @abstractmethod
     async def generate(
@@ -47,6 +54,7 @@ class AIProvider(ABC):
 
     async def aclose(self) -> None:
         """Release provider resources (clients, sessions). Idempotent."""
+        return None
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return f"<{type(self).__name__} name={self.name!r}>"

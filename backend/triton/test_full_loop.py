@@ -1,25 +1,27 @@
 """Full-loop integration test: LINA (Python) → TX → Triton (Rust) → RX → LINA.
 
-Also covers the chat() component-foresight merge and the unresponsive-Triton
-timeout path.
+The chambers are pure-Python stdlib mmap; Triton attaches to the same files
+with memmap3. Also covers the chat() component-foresight merge and the
+unresponsive-Triton timeout path.
 """
 import asyncio
 import os
 import subprocess
 import sys
 import time
+from typing import Any, cast
 
 # Short foresight window so the timeout test is fast (read at import time).
 os.environ.setdefault("LINA_FORESIGHT_TIMEOUT_SECONDS", "0.3")
 
 sys.path.insert(0, "/home/server/LiNa_Discovery/backend/lina")
-sys.path.insert(0, "/home/server/LiNa_Discovery/backend/ipc/python")
 
-import ipc_bridge  # noqa: E402
+import ipc  # noqa: E402 — the pure-Python chamber bridge (no PyO3)
 
 TRITON_BIN = "/home/server/LiNa_Discovery/backend/triton/target/release/triton"
 
 results = []
+
 
 def check(name, fn):
     try:
@@ -27,11 +29,13 @@ def check(name, fn):
         results.append((name, "OK"))
     except Exception as e:
         results.append((name, f"FAIL: {type(e).__name__}: {e}"))
-        import traceback; traceback.print_exc()
+        import traceback
+
+        traceback.print_exc()
 
 
 # ---------------------------------------------------------------------------
-# Full loop: bridge ⇄ triton binary
+# Full loop: chambers ⇄ triton binary
 # ---------------------------------------------------------------------------
 
 def test_full_loop_binary():
@@ -39,11 +43,11 @@ def test_full_loop_binary():
         [TRITON_BIN], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
     try:
-        b = ipc_bridge.IPCBridge()
+        b = ipc.IPCBridge()
         b.reset()
         time.sleep(1.0)  # triton retries attach every 200ms
 
-        query = "hello triton — component foresight check".encode("utf-8")
+        query = "hello triton — component foresight check".encode()
         b.push_tx(query)
 
         echo = None
@@ -88,6 +92,7 @@ class FakeVoice:
         await asyncio.sleep(self.delay)
         return "That is a fair way to see it, and I want to understand it better."
 
+
 class FakeDB:
     async def fetchrow(self, query, *args):
         if "lina_context_injection" in query:
@@ -109,6 +114,7 @@ class FakeDB:
         return None
     async def execute(self, *a, **k):
         return "INSERT 0 1"
+
 
 class FakeCache:
     def __init__(self):
@@ -135,6 +141,11 @@ class FakeCache:
         return []
 
 
+def bridge_stub():
+    """A minimal bridge-service stand-in: publishes an allocated bridge."""
+    return cast(Any, type("S", (), {"bridge": ipc.IPCBridge()})())
+
+
 def run_chat(core, message, session_id="s1"):
     from lina_service import ChatRequest
     req = ChatRequest(user_id="u1", session_id=session_id, message=message)
@@ -142,7 +153,6 @@ def run_chat(core, message, session_id="s1"):
 
 
 def test_chat_with_responsive_triton():
-    import lina_service
     from lina_service import LINACore
 
     proc = subprocess.Popen(
@@ -152,7 +162,9 @@ def test_chat_with_responsive_triton():
         time.sleep(0.8)  # triton attaches (files may not exist yet — retries)
         cache = FakeCache()
         voice = FakeVoice(delay=0.4)
-        core = LINACore(FakeDB(), cache, voice)
+        core = LINACore(
+            cast(Any, FakeDB()), cast(Any, cache), cast(Any, voice), bridge_stub()
+        )
         assert core.ipc is not None and core.ipc.available()
 
         resp = run_chat(core, "Please help me think through this carefully together.")
@@ -170,10 +182,12 @@ def test_chat_with_responsive_triton():
 
 
 def test_chat_without_triton():
-    import lina_service
     from lina_service import LINACore
 
-    core = LINACore(FakeDB(), FakeCache(), FakeVoice(delay=0.1))
+    core = LINACore(
+        cast(Any, FakeDB()), cast(Any, FakeCache()),
+        cast(Any, FakeVoice(delay=0.1)), bridge_stub(),
+    )
     # Bridge exists but nobody consumes — must time out and continue.
     start = time.monotonic()
     resp = run_chat(core, "Hello, are you there?")
@@ -188,10 +202,10 @@ def test_chat_without_triton():
 
 
 def test_chat_voice_failure_degrades_to_503():
-    import lina_service
-    from lina_service import LINACore, ChatRequest
     from fastapi import HTTPException
-    from providers import VoicePool, VoicePoolError
+    from lina_service import ChatRequest, LINACore
+
+    from providers import VoicePool
 
     # A pool whose only provider fails → VoicePoolError → 503, no crash.
     class BrokenProvider:
@@ -202,8 +216,8 @@ def test_chat_voice_failure_degrades_to_503():
         async def aclose(self):
             pass
 
-    pool = VoicePool([BrokenProvider()])
-    core = LINACore(FakeDB(), FakeCache(), pool)
+    pool = VoicePool(cast(Any, [BrokenProvider()]))
+    core = LINACore(cast(Any, FakeDB()), cast(Any, FakeCache()), cast(Any, pool))
     req = ChatRequest(user_id="u1", session_id="s1", message="test")
     try:
         asyncio.run(core.chat(req))
@@ -215,19 +229,21 @@ def test_chat_voice_failure_degrades_to_503():
 
 
 def test_chat_without_bridge():
-    import lina_service
     from lina_service import LINACore
 
-    lina_service.ipc_bridge = type("X", (), {"IPCBridge": lambda: (_ for _ in ()).throw(RuntimeError("no shm"))})
-    core = LINACore(FakeDB(), FakeCache(), FakeVoice(delay=0.1))
+    # No bridge service published (standalone / tests) — the loop-less case.
+    # LINACore tolerates the absence; chat continues without chambers.
+    core = LINACore(
+        cast(Any, FakeDB()), cast(Any, FakeCache()), cast(Any, FakeVoice(delay=0.1))
+    )
     assert core.ipc is None
     resp = run_chat(core, "Bridge is gone — still alive?")
     assert resp.evaluation["is_aligned"] in (True, False)
-    results.append(("chat + no bridge", "OK (graceful fallback)"))
+    results.append(("chat + no bridge", "OK (continues without chambers)"))
 
 
 if __name__ == "__main__":
-    check("full loop (bridge ⇄ triton)", test_full_loop_binary)
+    check("full loop (chambers ⇄ triton)", test_full_loop_binary)
     check("chat + responsive triton", test_chat_with_responsive_triton)
     check("chat + no triton (timeout)", test_chat_without_triton)
     check("chat + voice failure (503)", test_chat_voice_failure_degrades_to_503)
@@ -239,5 +255,10 @@ if __name__ == "__main__":
         print(f"[{status}] {name}")
         if not status.startswith("OK"):
             ok = False
+
     print("=" * 60)
-    print("ALL FULL-LOOP TESTS PASS" if ok else "FAILURES PRESENT")
+    if ok:
+        print("ALL FULL-LOOP TESTS PASS")
+    else:
+        print("FAILURES PRESENT")
+        sys.exit(1)

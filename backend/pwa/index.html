@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#7c3aed">
+  <title>LINA</title>
+  <link rel="manifest" href="/pwa/manifest.webmanifest">
+  <link rel="icon" href="/pwa/icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/pwa/styles.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">
+      <img src="/pwa/icons/icon.svg" alt="LINA" width="28" height="28">
+      <span class="brand-name">LINA</span>
+      <span id="season-chip" class="chip" title="season">spring</span>
+    </div>
+    <div class="status">
+      <span id="chip-bridge" class="chip">bridge …</span>
+      <span id="chip-voice" class="chip">voice …</span>
+      <span id="chip-db" class="chip">db …</span>
+      <span id="chip-sw" class="chip">offline-ready …</span>
+    </div>
+  </header>
+
+  <nav id="tabs">
+    <button class="tab active" data-tab="chat">Chat</button>
+    <button class="tab" data-tab="actions">Actions <span id="pending-count" class="count" hidden>0</span></button>
+    <button class="tab" data-tab="telemetry">Telemetry</button>
+    <button class="tab" data-tab="files">Files</button>
+  </nav>
+
+  <main>
+    <!-- ── Chat ─────────────────────────────────────────────────────────── -->
+    <section id="panel-chat" class="panel active">
+      <div id="chat-log" class="log" aria-live="polite"></div>
+      <form id="chat-form" class="input-row">
+        <input id="chat-input" type="text" placeholder="Say something to LINA…" autocomplete="off">
+        <button type="submit">Send</button>
+      </form>
+    </section>
+
+    <!-- ── Actions (human-in-the-loop) ──────────────────────────────────── -->
+    <section id="panel-actions" class="panel">
+      <div class="grid-2">
+        <div>
+          <h2>Propose</h2>
+          <form id="propose-command" class="stack">
+            <input name="description" placeholder="Description (what and why)" required>
+            <input name="command" placeholder="Shell command to run in the workspace" required>
+            <button type="submit">Propose command</button>
+          </form>
+          <form id="propose-write" class="stack">
+            <input name="description" placeholder="Description" required>
+            <input name="path" placeholder="Path within an access root (e.g. notes/idea.txt or /home/server/lina/…) " required>
+            <textarea name="content" placeholder="File content" rows="4" required></textarea>
+            <button type="submit">Propose file write</button>
+          </form>
+        </div>
+        <div>
+          <h2>Pending <span id="pending-count-2"></span></h2>
+          <div id="pending-list" class="stack"></div>
+        </div>
+      </div>
+      <h2>Audit trail</h2>
+      <div id="audit-list" class="stack small"></div>
+    </section>
+
+    <!-- ── Telemetry ────────────────────────────────────────────────────── -->
+    <section id="panel-telemetry" class="panel">
+      <div class="grid-3" id="metric-cards"></div>
+      <h2>Live feed</h2>
+      <pre id="telemetry-feed" class="log mono"></pre>
+    </section>
+
+    <!-- ── Files (OPFS + workspace) ─────────────────────────────────────── -->
+    <section id="panel-files" class="panel">
+      <div class="grid-2">
+        <div>
+          <h2>Browser vault (OPFS)</h2>
+          <div class="stack">
+            <button id="opfs-root">Open OPFS root</button>
+            <button id="opfs-picker">Open a folder (File System Access API)</button>
+            <p class="hint">OPFS is browser-managed storage — safe, but it lives inside the browser. To move something onto your real disk, read it here and propose a write on the Actions tab.</p>
+            <div id="opfs-browser" class="log mono small"></div>
+          </div>
+        </div>
+        <div>
+          <h2>Your filesystem (approved actions only)</h2>
+          <p class="hint">This is where she touches your real disk — the workspace plus whatever you granted in LINA_ACCESS_ROOTS. Every read, write, and command executes only after you approve it on the Actions tab.</p>
+          <div id="ws-status" class="hint"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/pwa/opfs.js"></script>
+  <script src="/pwa/app.js"></script>
+</body>
+</html>

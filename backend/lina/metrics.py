@@ -12,7 +12,7 @@ from collections import Counter
 
 _STARTED_AT = time.monotonic()
 
-_COUNTERS: dict[str, Counter] = {
+_COUNTERS: dict[str, Counter[str]] = {
     "lina_requests_total": Counter(),
     "lina_evaluations_total": Counter(),
     "lina_corrections_total": Counter(),
@@ -43,6 +43,14 @@ def set_gauge(name: str, value: float) -> None:
 
 def uptime_seconds() -> float:
     return time.monotonic() - _STARTED_AT
+
+
+def summary() -> dict[str, int]:
+    """Per-family totals for dashboards and telemetry."""
+    return {
+        name: sum(counter.values())
+        for name, counter in _COUNTERS.items()
+    }
 
 
 def render() -> str:

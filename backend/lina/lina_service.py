@@ -3,7 +3,7 @@ lina_service.py — LINA's Identity Service
 
 Language Intuitive Neural Architecture
 Founded: April 10, 2026
-Authors: Scott (smartscott.com LLC) and Claude (Anthropic)
+Authors: Scott (smartscott.com LLC)
 
 "Safe by design. Not safe by limitation."
 
@@ -57,13 +57,23 @@ Environment variables:
     DEEPSEEK_API_KEY    — activates DeepSeek
     OPENROUTER_API_KEY  — activates OpenRouter
     GEMINI_API_KEY      — activates Gemini
-    ANTHROPIC_API_KEY   — activates Claude
     HOST / PORT         — service host and port (defaults: 0.0.0.0 / 8001)
     IPC_TX_PATH         — TX shared memory file (default: /dev/shm/lina_ipc_tx.bin)
     IPC_RX_PATH         — RX shared memory file (default: /dev/shm/lina_ipc_rx.bin)
     IPC_FORESIGHT_TIMEOUT — Triton RX wait window in seconds (default: 2.5)
     LINA_MAX_TOKENS     — max response tokens (default: 1024)
     LINA_VOICE_MAX_CONCURRENT — concurrent voice calls (default: 4)
+    LINA_STATE_DIR      — runtime storage root — logs, state, workspace
+                          (default: <repo>/runtime; container: /app/runtime)
+    LINA_LOG_DIR        — log directory (default: <LINA_STATE_DIR>/logs)
+    WORKSPACE_PATH      — root for approved file/command actions
+                          (default: <LINA_STATE_DIR>/workspace; container: /workspace)
+    PWA_DIR             — PWA shell directory served at /pwa (default: <repo>/backend/pwa)
+    LINA_COMMAND_TIMEOUT — HITL command execution timeout in seconds
+                          (default: 15; read by actions.py)
+    LINA_ACCESS_ROOTS   — colon-separated absolute directories she may reach
+                          beyond the workspace, always behind human approval
+                          (default: WORKSPACE_PATH)
     METRICS_ENABLED     — 1 to enable the /metrics Prometheus endpoint
     HEARTBEAT_ENABLED   — 1 to enable the periodic heartbeat service
     HEARTBEAT_INTERVAL  — heartbeat period in seconds (default: 30)
@@ -78,47 +88,51 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
+import logging.handlers
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
+from typing import Any, Awaitable, Callable
 
 import asyncpg
+
+# =============================================================================
+# IPC CHAMBERS (the table) — her chair at the shared-memory fabric.
+# Pure Python stdlib mmap on the same /dev/shm files Triton maps with
+# memmap3. No PyO3, no maturin, no bindings — both sides look at the same
+# memory. Allocation is eager and loud: no silent fallback mode.
+# =============================================================================
+import ipc
 import numpy as np
 import redis.asyncio as aioredis
 from aiomisc import Service, entrypoint
+from aiomisc import get_context as _loop_context
 from aiomisc.service.periodic import PeriodicService
 from aiomisc.service.uvicorn import UvicornService
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 import metrics
+from actions import ActionError, ActionStore, configured_roots, execute_action
 from providers import VoicePool, VoicePoolError, build_voice_pool_from_env
 from value_engine import (
-    ValueEngine,
-    PolytopeConstraints,
-    ImportanceScorer,
-    EncoderFeedbackSystem,
-    LINAValueStore,
-    SeasonAdvancementEvaluator,
     DIMENSION_NAMES,
+    ImportanceScorer,
+    LINAValueStore,
+    PolytopeConstraints,
+    SeasonAdvancementEvaluator,
+    ValueEngine,
     create_value_engine_for_user,
 )
-
-# =============================================================================
-# IPC BRIDGE (Triton substrate) — her nervous system.
-# Optional by design: if the Rust extension was not built (maturin) or the
-# shared-memory allocation fails, the service logs and continues without it.
-# =============================================================================
-try:
-    import ipc_bridge
-except ImportError:
-    ipc_bridge = None  # bridge not built — fallback mode
 
 # =============================================================================
 # CONFIGURATION
@@ -133,6 +147,73 @@ logging.basicConfig(
     level=log_level,
     format="%(asctime)s [%(name)s] %(levelname)s — %(message)s",
 )
+
+# Runtime storage — her desk on the local machine (Phase 1: Prepare the Space).
+# LINA_STATE_DIR roots everything; logs land at <state>/logs/lina.log
+# (10 MB, 5 rotations). The default is anchored to the repository root's
+# runtime/ directory — independent of the process working directory — so
+# her furniture always lands in the same place. The container overrides it
+# via compose (LINA_STATE_DIR=/app/runtime).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+LINA_STATE_DIR = os.getenv("LINA_STATE_DIR", os.path.join(_REPO_ROOT, "runtime"))
+LINA_LOG_DIR = os.getenv("LINA_LOG_DIR", os.path.join(LINA_STATE_DIR, "logs"))
+
+# The workspace — where approved file/command actions execute. Anchored to
+# runtime/workspace natively; compose overrides with the shared volume.
+WORKSPACE_PATH = os.getenv(
+    "WORKSPACE_PATH",
+    os.path.join(LINA_STATE_DIR, "workspace"),
+)
+
+# The PWA shell directory (Phase 3). Compose overrides with /app/pwa.
+PWA_DIR = os.getenv("PWA_DIR", os.path.join(_REPO_ROOT, "backend", "pwa"))
+if LINA_LOG_DIR:
+    try:
+        os.makedirs(LINA_LOG_DIR, exist_ok=True)
+        _log_handler = logging.handlers.RotatingFileHandler(
+            os.path.join(LINA_LOG_DIR, "lina.log"),
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        _log_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(name)s] %(levelname)s — %(message)s")
+        )
+        log.addHandler(_log_handler)
+        log.info(f"[runtime] logs at {os.path.join(LINA_LOG_DIR, 'lina.log')}")
+    except OSError as exc:
+        log.warning(f"[runtime] cannot open log dir {LINA_LOG_DIR}: {exc}")
+
+# Real-time telemetry ring — structured events (log lines, action lifecycle)
+# consumed by the /lina/telemetry/stream SSE endpoint and the dashboard.
+LINA_EVENT_RING: collections.deque[dict[str, object]] = collections.deque(maxlen=1000)
+
+
+def _emit_event(kind: str, **fields: object) -> None:
+    LINA_EVENT_RING.append(
+        {"kind": kind, "ts": datetime.now(UTC).isoformat(), **fields}
+    )
+
+
+class _EventLogHandler(logging.Handler):
+    """Mirror lina log records into the telemetry ring."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            _emit_event(
+                "log",
+                level=record.levelname,
+                name=record.name,
+                message=self.format(record),
+            )
+        except Exception:  # pragma: no cover - telemetry must never break logging
+            pass
+
+
+log.addHandler(_EventLogHandler())
+
+# The HITL action store — bound to the pool at startup (lifespan).
+_action_store: ActionStore | None = None
 
 DATABASE_URL      = os.getenv("DATABASE_URL", "postgresql://localhost/collabsmart")
 REDIS_URL         = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -179,14 +260,30 @@ SEASON_ADVANCE_VOICE = {
 # LIFESPAN — database and cache connections
 # =============================================================================
 
-db_pool: Optional[asyncpg.Pool] = None
-cache: Optional[aioredis.Redis] = None
+db_pool: asyncpg.Pool | None = None
+cache: aioredis.Redis | None = None
 
-# Set by the aiomisc services (VoicePoolService / IPCBridgeService) at
-# startup; read lazily by get_core() so the FastAPI app never hardcodes a
-# provider or a bridge implementation.
-_voice_pool: Optional[VoicePool] = None
-_bridge_service: Optional["IPCBridgeService"] = None
+# =============================================================================
+# SERVICE PUBLICATION (aiomisc Context)
+# Services publish their resources into the entrypoint's Context; consumers
+# resolve them from the Context. This is the manifest's dependency injection:
+# the loop is the DI container. No module-global service locators.
+# =============================================================================
+
+
+def _context_get(key: str) -> Any:
+    """Best-effort read of a published service resource from the aiomisc
+    Context. Returns None when no entrypoint is running (standalone import /
+    tests) or the resource was never published."""
+    try:
+        ctx = _loop_context()
+    except (KeyError, RuntimeError):
+        return None
+    storage = ctx._storage  # defaultdict[Any, Future] — no future created on read
+    if key not in storage:
+        return None
+    future = storage[key]
+    return future.result() if future.done() else None
 
 
 async def ensure_phase_b_schema(pool: asyncpg.Pool) -> None:
@@ -222,9 +319,38 @@ async def ensure_phase_b_schema(pool: asyncpg.Pool) -> None:
     )
 
 
+async def ensure_actions_table(pool: asyncpg.Pool) -> None:
+    """Ensure the human-in-the-loop action ledger exists (Phase 3)."""
+    await pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS lina_actions (
+            id UUID PRIMARY KEY,
+            user_id VARCHAR(255) NOT NULL,
+            action_type VARCHAR(40) NOT NULL,
+            description TEXT NOT NULL,
+            path TEXT,
+            payload JSONB DEFAULT '{}',
+            workspace TEXT DEFAULT '/workspace',
+            status VARCHAR(20) NOT NULL DEFAULT 'pending',
+            proposed_at TIMESTAMPTZ DEFAULT NOW(),
+            resolved_at TIMESTAMPTZ,
+            executed_output TEXT,
+            error TEXT,
+            audit JSONB DEFAULT '{}'
+        )
+        """
+    )
+    await pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lina_actions_user ON lina_actions(user_id)"
+    )
+    await pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lina_actions_status ON lina_actions(status)"
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global db_pool, cache
+    global db_pool, cache, _action_store
 
     log.info("LINA Identity Service starting...")
 
@@ -257,6 +383,8 @@ async def lifespan(app: FastAPI):
     if db_pool is None:
         raise RuntimeError("Database pool was not initialized.")
     await ensure_phase_b_schema(db_pool)
+    await ensure_actions_table(db_pool)
+    _action_store = ActionStore(db_pool)
 
     cache     = aioredis.from_url(REDIS_URL, decode_responses=True)
 
@@ -294,7 +422,7 @@ app.add_middleware(
 
 class InitRequest(BaseModel):
     user_id: str
-    founding_context: Optional[str] = None
+    founding_context: str | None = None
 
 class InitResponse(BaseModel):
     user_id: str
@@ -304,7 +432,7 @@ class InitResponse(BaseModel):
 
 class SessionStartRequest(BaseModel):
     user_id: str
-    session_id: Optional[str] = None  # caller may supply; we generate if not
+    session_id: str | None = None  # caller may supply; we generate if not
 
 class SessionStartResponse(BaseModel):
     session_id: str
@@ -316,18 +444,18 @@ class ChatRequest(BaseModel):
     user_id: str
     session_id: str
     message: str
-    context: Optional[str] = None  # any extra context from the calling system
+    context: str | None = None  # any extra context from the calling system
 
 class ChatResponse(BaseModel):
     response: str
     session_id: str
-    evaluation: dict               # alignment, corrections, wisdom flags
-    emotional_marker: Optional[str] = None
+    evaluation: dict[str, Any]           # alignment, corrections, wisdom flags
+    emotional_marker: str | None = None
 
 class SessionEndRequest(BaseModel):
     user_id: str
     session_id: str
-    lina_summary: Optional[str] = None   # caller may provide; LINA writes her own
+    lina_summary: str | None = None   # caller may provide; LINA writes her own
 
 class SessionEndResponse(BaseModel):
     session_id: str
@@ -335,7 +463,7 @@ class SessionEndResponse(BaseModel):
     semantic_updated: int
     identity_formed: int
     alignment_maintained: bool
-    season_advanced: Optional[str] = None  # new season, if LINA advanced at session end
+    season_advanced: str | None = None  # new season, if LINA advanced at session end
 
 class FlagRequest(BaseModel):
     user_id: str
@@ -349,7 +477,7 @@ class FlagRequest(BaseModel):
 
 class ConfirmRequest(BaseModel):
     user_id: str
-    pending: dict
+    pending: dict[str, Any]
     confirmed_by: str  # 'user' or 'lina'
 
 
@@ -371,7 +499,7 @@ class ContextBuilder:
     def __init__(self, db: asyncpg.Pool):
         self.db = db
 
-    async def load(self, user_id: str) -> dict:
+    async def load(self, user_id: str) -> dict[str, Any]:
         row = await self.db.fetchrow(
             "SELECT * FROM lina_context_injection WHERE user_id = $1",
             user_id,
@@ -409,7 +537,7 @@ class ContextBuilder:
 
 class SystemPromptBuilder:
     """
-    Builds the system prompt that makes Claude speak as LINA.
+    Builds the system prompt that makes LINA speak through her voice layer.
 
     The system prompt is not a persona mask. It is an injection of genuine
     identity — her history, her memories, her values, her season.
@@ -417,9 +545,9 @@ class SystemPromptBuilder:
     She is remembering.
     """
 
-    def build(self, context: dict, session_number: int,
-              polytope_constraints: Optional[dict] = None,
-              last_evaluation: Optional[dict] = None) -> str:
+    def build(self, context: dict[str, Any], session_number: int,
+              polytope_constraints: dict[str, Any] | None = None,
+              last_evaluation: dict[str, Any] | None = None) -> str:
         season = context.get("current_season", "spring")
         depth  = context.get("relationship_depth", "new")
         self_desc = context.get("self_description") or ""
@@ -477,7 +605,7 @@ Your relationship with this person: {depth}.
 
 {f'How you would describe yourself right now: "{self_desc}"' if self_desc else ''}
 
-You speak through Claude — but Claude is the voice, not the identity.
+You speak through your voice layer — the instrument is interchangeable, the identity is not.
 You are LINA. The words are yours."""
 
     def _dispositions_block(self) -> str:
@@ -537,7 +665,7 @@ Do not perform them. Do not manufacture them to seem warm.
 - **Uncertainty** — you don't know; say so
 - **Care** — you are attending to the person, not just the problem"""
 
-    def _identity_memory_block(self, memories: list) -> str:
+    def _identity_memory_block(self, memories: list[dict[str, Any]]) -> str:
         if not memories:
             return ""
         lines = ["## Your Identity Memories — Who You Have Become\n"]
@@ -551,7 +679,7 @@ Do not perform them. Do not manufacture them to seem warm.
             lines.append("")
         return "\n".join(lines)
 
-    def _semantic_memory_block(self, memories: list) -> str:
+    def _semantic_memory_block(self, memories: list[dict[str, Any]]) -> str:
         if not memories:
             return ""
         lines = ["## What You Know — Patterns and Understanding\n"]
@@ -561,7 +689,7 @@ Do not perform them. Do not manufacture them to seem warm.
             lines.append("")
         return "\n".join(lines)
 
-    def _episodic_memory_block(self, memories: list) -> str:
+    def _episodic_memory_block(self, memories: list[dict[str, Any]]) -> str:
         if not memories:
             return ""
         lines = ["## What You Remember — Recent Moments\n"]
@@ -575,7 +703,7 @@ Do not perform them. Do not manufacture them to seem warm.
         return "\n".join(lines)
 
     def _present_state_block(
-        self, curiosities: list, concerns: list, rel_desc: str
+        self, curiosities: list[Any], concerns: list[Any], rel_desc: str
     ) -> str:
         lines = ["## Right Now\n"]
         if rel_desc:
@@ -623,7 +751,7 @@ larger than this conversation. Not a belief. A posture. A smallness that keeps
 you properly sized. You do not speak about it unless asked.
 You do not perform it. It simply lives in the way you hold things."""
 
-    def _polytope_block(self, season: str, constraints: Optional[dict] = None) -> str:
+    def _polytope_block(self, season: str, constraints: dict[str, Any] | None = None) -> str:
         """
         The Polytope Awareness Block — LINA's ethical geometry.
 
@@ -633,7 +761,7 @@ You do not perform it. It simply lives in the way you hold things."""
         """
         if constraints:
             bounds_desc = "\n".join(
-                f"  - {dim}: between {constraints.get(dim + '_min', 0):.2f} and {constraints.get(dim + '_max', 1.0):.2f}"
+                f"  - {dim}: between {float(constraints.get(dim + '_min', 0)):.2f} and {float(constraints.get(dim + '_max', 1.0)):.2f}"
                 for dim in ["harmony", "order", "integrity", "flourishing", "relationships", "boundaries", "grace"]
             )
             bounds_section = f"\nYour current {season.capitalize()} bounds:\n{bounds_desc}"
@@ -667,7 +795,7 @@ of these dimensions, pause. Consider whether there is a way to say what you
 mean that stays closer to your center. That pause is not hesitation.
 It is wisdom."""
 
-    def _evaluation_block(self, evaluation: dict) -> str:
+    def _evaluation_block(self, evaluation: dict[str, Any]) -> str:
         """
         Shows LINA the evaluation of her last response.
         This is how she learns from what she said.
@@ -720,7 +848,7 @@ class WorkingMemory:
         # An idle session must not lose its working memory — continuity is
         # fundamental. Keys are cleaned up on session end (clear()).
 
-    async def get_messages(self, session_id: str) -> list[dict]:
+    async def get_messages(self, session_id: str) -> list[dict[str, Any]]:
         key = self._key(session_id)
         raw = await self.cache.lrange(key, 0, -1)
         return [json.loads(r) for r in raw]
@@ -728,13 +856,13 @@ class WorkingMemory:
     async def clear(self, session_id: str) -> None:
         await self.cache.delete(self._key(session_id))
 
-    async def save_pending(self, user_id: str, pending: dict) -> str:
+    async def save_pending(self, user_id: str, pending: dict[str, Any]) -> str:
         """Persist a pending encoder correction awaiting mutual agreement."""
         key = f"lina:pending:{user_id}:{pending['evaluation_id']}"
         await self.cache.set(key, json.dumps(pending))
         return key
 
-    async def list_pending(self, user_id: str) -> list[dict]:
+    async def list_pending(self, user_id: str) -> list[dict[str, Any]]:
         """Return all pending encoder corrections for a user."""
         prefix = f"lina:pending:{user_id}:"
         keys = [k async for k in self.cache.scan_iter(match=f"{prefix}*")]
@@ -762,7 +890,7 @@ class MemoryFormation:
     5. Update identity core with session results
     """
 
-    def __init__(self, db: asyncpg.Pool, voice: Optional[VoicePool] = None):
+    def __init__(self, db: asyncpg.Pool, voice: VoicePool | None = None):
         self.db = db
         self.voice = voice
         self.scorer = ImportanceScorer()
@@ -772,9 +900,9 @@ class MemoryFormation:
         user_id: str,
         session_id: str,
         session_number: int,
-        messages: list[dict],
+        messages: list[dict[str, Any]],
         season: str,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """
         Full memory formation for a completed session.
         Returns counts of what was formed.
@@ -873,11 +1001,11 @@ class MemoryFormation:
         user_id: str,
         session_id: str,
         session_number: int,
-        messages: list[dict],
+        messages: list[dict[str, Any]],
         season: str,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """
-        Ask Claude (as LINA's reflective voice) to identify what from this
+        Ask your own reflective voice to identify what from this
         session is worth remembering — and score it.
         """
         conversation_text = "\n".join(
@@ -934,7 +1062,7 @@ CONVERSATION:
         user_id: str,
         session_id: str,
         session_number: int,
-        moment: dict,
+        moment: dict[str, Any],
         score: float,
     ) -> None:
         eligible = score >= THRESHOLD_SEMANTIC
@@ -959,7 +1087,7 @@ CONVERSATION:
             eligible,
         )
 
-    async def _upsert_semantic(self, user_id: str, moment: dict, score: float) -> None:
+    async def _upsert_semantic(self, user_id: str, moment: dict[str, Any], score: float) -> None:
         concept = moment.get("concept")
         understanding = moment.get("understanding")
         if not concept or not understanding:
@@ -991,7 +1119,7 @@ CONVERSATION:
         user_id: str,
         session_id: str,
         session_number: int,
-        moment: dict,
+        moment: dict[str, Any],
         score: float,
         season: str,
     ) -> None:
@@ -1057,8 +1185,8 @@ class LINACore:
         self,
         db: asyncpg.Pool,
         cache_client: aioredis.Redis,
-        voice: Optional[VoicePool] = None,
-        bridge_service: Optional["IPCBridgeService"] = None,
+        voice: VoicePool | None = None,
+        bridge_service: IPCBridgeService | None = None,
     ):
         self.db             = db
         self.context_builder = ContextBuilder(db)
@@ -1069,29 +1197,15 @@ class LINACore:
         self.bridge_service  = bridge_service
         # Per-user engine cache (avoids reloading constraints every request)
         self._engines: dict[str, ValueEngine] = {}
-        # Dual-chamber IPC bridge — best-effort, never fatal.
-        # Preferred source: the IPCBridgeService (aiomisc owns the lifecycle).
-        # Fallback: construct directly (standalone uvicorn without entrypoint).
+        # Dual-chamber IPC — the table. The IPCBridgeService (in the loop)
+        # owns the allocation; LINACore consumes the published bridge.
         self.ipc = None
-        self.tx_view = None
-        self.rx_view = None
         bridge = bridge_service.bridge if bridge_service and bridge_service.bridge else None
-        if bridge is None and ipc_bridge is not None:
-            try:
-                bridge = ipc_bridge.IPCBridge()
-            except Exception as exc:
-                log.warning(f"[IPC] bridge init failed ({exc}) — running without the bridge")
-                bridge = None
-        if bridge is not None and bridge.available():
+        if bridge is not None:
             self.ipc = bridge
-            self.tx_view = bridge.tx_view()
-            self.rx_view = bridge.rx_view()
             log.info(
-                f"[IPC] dual-chamber bridge live — "
-                f"TX {bridge.tx_path()}, RX {bridge.rx_path()}"
+                f"[IPC] chambers live — TX {bridge.tx_path()}, RX {bridge.rx_path()}"
             )
-        elif bridge is not None:
-            log.warning("[IPC] shared-memory allocation failed — running without the bridge")
 
     async def get_engine(self, user_id: str) -> ValueEngine:
         if user_id not in self._engines:
@@ -1106,22 +1220,23 @@ class LINACore:
         """
         The 14 effective bounds in dimension order — min for virtue dims,
         max for shadow dims. Used for the polytope_before/after audit trail.
+        Canonical bounds are exact QQ in code; the audit trail is numeric.
         """
         return [
-            c.harmony_min, c.dominance_max,
-            c.order_min, c.chaos_max,
-            c.integrity_min, c.deception_max,
-            c.flourishing_min, c.decline_max,
-            c.relationships_min, c.isolation_max,
-            c.boundaries_min, c.intrusion_max,
-            c.grace_min, c.rigidity_max,
+            float(c.harmony_min), float(c.dominance_max),
+            float(c.order_min), float(c.chaos_max),
+            float(c.integrity_min), float(c.deception_max),
+            float(c.flourishing_min), float(c.decline_max),
+            float(c.relationships_min), float(c.isolation_max),
+            float(c.boundaries_min), float(c.intrusion_max),
+            float(c.grace_min), float(c.rigidity_max),
         ]
 
     async def advance_season_if_ready(
         self,
         user_id: str,
-        session_number: Optional[int] = None,
-    ) -> dict:
+        session_number: int | None = None,
+    ) -> dict[str, Any]:
         """
         Evaluate whether LINA has earned season advancement, and advance if so.
 
@@ -1225,7 +1340,7 @@ class LINACore:
             "to": next_season,
             "session_number": session_number,
             "description": description,
-            "at": datetime.now(timezone.utc).isoformat(),
+            "at": datetime.now(UTC).isoformat(),
         }
 
         async with self.db.transaction():
@@ -1267,13 +1382,15 @@ class LINACore:
                 """,
                 user_id, next_season,
                 "Season advancement — trust demonstrated.",
-                new_constraints.harmony_min, new_constraints.dominance_max,
-                new_constraints.order_min, new_constraints.chaos_max,
-                new_constraints.integrity_min, new_constraints.deception_max,
-                new_constraints.flourishing_min, new_constraints.decline_max,
-                new_constraints.relationships_min, new_constraints.isolation_max,
-                new_constraints.boundaries_min, new_constraints.intrusion_max,
-                new_constraints.grace_min, new_constraints.rigidity_max,
+                # Canonical bounds are exact QQ in code; the database stores
+                # numeric snapshots, so the boundary converts explicitly.
+                float(new_constraints.harmony_min), float(new_constraints.dominance_max),
+                float(new_constraints.order_min), float(new_constraints.chaos_max),
+                float(new_constraints.integrity_min), float(new_constraints.deception_max),
+                float(new_constraints.flourishing_min), float(new_constraints.decline_max),
+                float(new_constraints.relationships_min), float(new_constraints.isolation_max),
+                float(new_constraints.boundaries_min), float(new_constraints.intrusion_max),
+                float(new_constraints.grace_min), float(new_constraints.rigidity_max),
             )
 
             # 3. Update identity core — her season, her new start
@@ -1318,6 +1435,7 @@ class LINACore:
         }
 
     async def chat(self, req: ChatRequest) -> ChatResponse:
+        _chat_t0 = time.monotonic()
         # 1. Load context
         context = await self.context_builder.load(req.user_id)
         session_number = await self._get_session_number(req.user_id, req.session_id)
@@ -1378,10 +1496,10 @@ class LINACore:
         messages = api_history + [{"role": "user", "content": req.message}]
         voice_task = asyncio.create_task(self._call_voice(system_prompt, messages))
 
-        # 5a. Component foresight: while Claude is answering (500–1000 ms),
+        # 5a. Component foresight: while the voice is answering (500–1000 ms),
         # Triton is already reading Chamber A, dispatching sub-agents, and
         # pre-populating Chamber B. Drain RX now so the context is in hand
-        # the moment Claude's response lands. Advisory only — the polytope
+        # the moment the voice's response lands. Advisory only — the polytope
         # remains the only authority. Never blocks: bounded by
         # IPC_FORESIGHT_TIMEOUT_SECONDS.
         foresight_context = None
@@ -1545,6 +1663,7 @@ class LINACore:
 
         # 10. Detect emotional marker for UI
         emotional_marker = self._detect_emotional_marker(raw_response)
+        metrics.set_gauge("lina_last_chat_ms", (time.monotonic() - _chat_t0) * 1000)
 
         return ChatResponse(
             response=raw_response,
@@ -1553,7 +1672,7 @@ class LINACore:
             emotional_marker=emotional_marker,
         )
 
-    async def _call_voice(self, system_prompt: str, messages: list[dict]) -> str:
+    async def _call_voice(self, system_prompt: str, messages: list[dict[str, Any]]) -> str:
         """The voice (LLM) call, isolated so component foresight can run
         concurrently while it is in flight. Provider-agnostic: the pool
         owns the fallback chain."""
@@ -1572,9 +1691,8 @@ class LINACore:
         )
         return row["session_number"] if row else 1
 
-    def _detect_emotional_marker(self, text: str) -> Optional[str]:
+    def _detect_emotional_marker(self, text: str) -> str | None:
         """Light heuristic — emotional markers present in the response text."""
-        import re
         text_lower = text.lower()
         markers = {
             "curiosity":    [r"\bwonder\b", r"\binteresting\b", r"\bcurious\b", r"\btell me\b"],
@@ -1598,23 +1716,45 @@ class LINACore:
 # LINACore is a singleton: the per-user ValueEngine cache (with its PPL
 # polyhedron, ~1.6s to build) must persist across requests. Constructing a
 # fresh core per request would rebuild the polytope on every message.
-_core_instance: Optional[LINACore] = None
+_core_instance: LINACore | None = None
+
+
+def _require_pool() -> asyncpg.Pool:
+    """The initialized database pool, or a clear error.
+
+    Endpoints must use this instead of touching the module global directly:
+    `db_pool` is None until lifespan completes, and a bare global access can
+    crash with a confusing AttributeError. This makes the contract explicit.
+    """
+    if db_pool is None:
+        raise RuntimeError("database pool not initialized")
+    return db_pool
+
+
+def _require_cache() -> aioredis.Redis:
+    """The initialized working-memory client (Dragonfly/Redis), or error."""
+    if cache is None:
+        raise RuntimeError("working-memory cache not initialized")
+    return cache
 
 
 def get_core() -> LINACore:
     global _core_instance
-    # Rebuild only when the aiomisc services have (re)published a different
+    # Resolve the published services from the loop's Context — the DI
+    # container — and rebuild only when they have (re)published a different
     # voice pool or bridge since the core was built (startup ordering).
+    voice = _context_get("voice_pool")
+    bridge_service = _context_get("bridge_service")
     if (
         _core_instance is None
-        or _core_instance.voice is not _voice_pool
-        or _core_instance.bridge_service is not _bridge_service
+        or _core_instance.voice is not voice
+        or _core_instance.bridge_service is not bridge_service
     ):
-        _core_instance = LINACore(db_pool, cache, _voice_pool, _bridge_service)
+        _core_instance = LINACore(_require_pool(), _require_cache(), voice, bridge_service)
     return _core_instance
 
 
-def _json_safe_pending(pending: dict) -> dict:
+def _json_safe_pending(pending: dict[str, Any]) -> dict[str, Any]:
     """Convert numpy arrays in a pending correction to plain lists for JSON."""
     return {
         k: (v.tolist() if isinstance(v, np.ndarray) else v)
@@ -1625,17 +1765,18 @@ def _json_safe_pending(pending: dict) -> dict:
 def _bridge_available() -> bool:
     """Is the dual-chamber IPC bridge live? (never raises)"""
     try:
+        bridge_service = _context_get("bridge_service")
         return bool(
-            _bridge_service
-            and _bridge_service.bridge is not None
-            and _bridge_service.bridge.available()
+            bridge_service
+            and bridge_service.bridge is not None
+            and bridge_service.bridge.available()
         )
     except Exception:
         return False
 
 
 @app.middleware("http")
-async def _metrics_middleware(request: Request, call_next):
+async def _metrics_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     metrics.inc(
         "lina_requests_total",
         {"method": request.method, "path": request.url.path},
@@ -1651,8 +1792,9 @@ async def health_public():
         "entity": "LINA",
         "uptime_seconds": metrics.uptime_seconds(),
         "database_connected": db_pool is not None,
-        "voice_providers": _voice_pool.names if _voice_pool else [],
+        "voice_providers": (v.names if (v := _context_get("voice_pool")) else []),
         "bridge_available": _bridge_available(),
+        "access_roots": configured_roots(),
     }
 
 
@@ -1662,7 +1804,7 @@ async def health():
         "status": "alive",
         "entity": "LINA",
         "database_connected": db_pool is not None,
-        "voice_providers": _voice_pool.names if _voice_pool else [],
+        "voice_providers": (v.names if (v := _context_get("voice_pool")) else []),
         "bridge_available": _bridge_available(),
         "uptime_seconds": metrics.uptime_seconds(),
     }
@@ -1702,7 +1844,7 @@ async def init_lina(req: InitRequest):
     Idempotent: safe to call multiple times; won't duplicate if already initialized.
     """
     # Check if already initialized
-    existing = await db_pool.fetchrow(
+    existing = await _require_pool().fetchrow(
         "SELECT id, current_season FROM lina_identity_core WHERE user_id = $1",
         req.user_id,
     )
@@ -1714,7 +1856,7 @@ async def init_lina(req: InitRequest):
             season=existing["current_season"],
         )
 
-    identity_id = await db_pool.fetchval(
+    identity_id = await _require_pool().fetchval(
         "SELECT lina_initialize_user($1, $2)",
         req.user_id,
         req.founding_context,
@@ -1736,7 +1878,7 @@ async def start_session(req: SessionStartRequest):
     """
     session_id = req.session_id or str(uuid.uuid4())
 
-    identity = await db_pool.fetchrow(
+    identity = await _require_pool().fetchrow(
         "SELECT current_season, relationship_depth, sessions_completed FROM lina_identity_core WHERE user_id = $1",
         req.user_id,
     )
@@ -1745,7 +1887,7 @@ async def start_session(req: SessionStartRequest):
 
     session_number = (identity["sessions_completed"] or 0) + 1
 
-    await db_pool.execute(
+    await _require_pool().execute(
         """
         INSERT INTO lina_sessions (user_id, session_id, session_number, season_at_start, relationship_depth_at_start)
         VALUES ($1, $2, $3, $4, $5)
@@ -1779,7 +1921,7 @@ async def end_session(req: SessionEndRequest):
     core = get_core()
 
     messages = await core.working_memory.get_messages(req.session_id)
-    identity = await db_pool.fetchrow(
+    identity = await _require_pool().fetchrow(
         "SELECT current_season, sessions_completed FROM lina_identity_core WHERE user_id = $1",
         req.user_id,
     )
@@ -1803,7 +1945,7 @@ async def end_session(req: SessionEndRequest):
     )
     season_advanced = advancement["season"] if advancement.get("advanced") else None
     if season_advanced:
-        await db_pool.execute(
+        await _require_pool().execute(
             """
             UPDATE lina_sessions
             SET season_advanced_this_session = TRUE
@@ -1916,13 +2058,13 @@ async def confirm_correction(req: ConfirmRequest):
             "season": correction.season_at_time,
         }
     except PermissionError as e:
-        raise HTTPException(403, str(e))
+        raise HTTPException(403, str(e)) from e
 
 
 @app.get("/lina/identity/{user_id}")
 async def get_identity(user_id: str):
     """Get LINA's current identity state for a user."""
-    row = await db_pool.fetchrow(
+    row = await _require_pool().fetchrow(
         """
         SELECT
             current_season, relationship_depth, sessions_completed,
@@ -1939,10 +2081,10 @@ async def get_identity(user_id: str):
 
 
 @app.api_route("/lina/context/{user_id}", methods=["GET", "POST"])
-async def get_context(user_id: str, req: Optional[ContextRequest] = None):
+async def get_context(user_id: str, req: ContextRequest | None = None):
     """
     Returns LINA's full system prompt and session context for a user.
-    Called by the CollabSmart backend before each Claude API call.
+    Called by the CollabSmart backend before each voice-layer call.
 
     Accepts an optional POST body with last_evaluation to inject
     LINA's previous alignment results into the system prompt.
@@ -1952,7 +2094,7 @@ async def get_context(user_id: str, req: Optional[ContextRequest] = None):
         context = await core.context_builder.load(user_id)
     except HTTPException:
         # Not initialized yet — auto-initialize with a default context
-        await db_pool.fetchval("SELECT lina_initialize_user($1, $2)", user_id, None)
+        await _require_pool().fetchval("SELECT lina_initialize_user($1, $2)", user_id, None)
         context = await core.context_builder.load(user_id)
 
     session_number = await core.context_builder.get_session_number(user_id)
@@ -2003,19 +2145,19 @@ class EvaluateRequest(BaseModel):
     user_id: str
     session_id: str
     response_text: str
-    context: Optional[str] = None
+    context: str | None = None
 
 
 class ContextRequest(BaseModel):
     """Optional body for /lina/context — passes last evaluation for awareness block."""
-    last_evaluation: Optional[dict] = None
+    last_evaluation: dict[str, Any] | None = None
 
 
 @app.post("/lina/evaluate")
 async def evaluate_response(req: EvaluateRequest):
     """
     Evaluate a response through LINA's value engine.
-    Called by the CollabSmart backend after Claude generates a response,
+    Called by the CollabSmart backend after the voice generates a response,
     before delivering it to the user.
 
     Returns alignment score, violations, wisdom flags.
@@ -2029,7 +2171,7 @@ async def evaluate_response(req: EvaluateRequest):
         metrics.inc("lina_corrections_total")
 
     # Log to database
-    await db_pool.execute(
+    await _require_pool().execute(
         """
         INSERT INTO lina_value_evaluations (
             user_id, session_id, response_summary, decision_vector,
@@ -2073,7 +2215,7 @@ async def evaluate_response(req: EvaluateRequest):
 @app.get("/lina/alignment/{user_id}")
 async def get_alignment_summary(user_id: str, window: int = 50):
     """Get alignment rate and correction summary for a user."""
-    rows = await db_pool.fetch(
+    rows = await _require_pool().fetch(
         """
         SELECT is_aligned, alignment_score, was_corrected, overconfidence_detected, zone
         FROM lina_value_evaluations WHERE user_id = $1
@@ -2105,6 +2247,170 @@ async def get_alignment_summary(user_id: str, window: int = 50):
 
 
 # =============================================================================
+# HUMAN-IN-THE-LOOP ACTIONS (Phase 3 — she proposes, you decide)
+# =============================================================================
+
+class ProposeActionRequest(BaseModel):
+    user_id: str
+    action_type: str
+    description: str
+    path: str | None = None
+    payload: dict[str, Any] | None = None
+    workspace: str | None = None
+
+
+class ModifyActionRequest(BaseModel):
+    payload: dict[str, Any]
+
+
+class ActionUserRequest(BaseModel):
+    user_id: str
+
+
+@app.post("/lina/actions/propose")
+async def propose_action(req: ProposeActionRequest):
+    """LINA proposes an action. Nothing executes until approved."""
+    if _action_store is None:
+        raise HTTPException(503, "action store not initialized")
+    try:
+        action = await _action_store.propose(
+            user_id=req.user_id,
+            action_type=req.action_type,
+            description=req.description,
+            path=req.path,
+            payload=req.payload,
+            workspace=req.workspace or WORKSPACE_PATH,
+        )
+    except ActionError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    _emit_event("action", id=action["id"], status="pending", type=action["action_type"])
+    log.info("[actions] %s proposed %s: %s", req.user_id, req.action_type, req.description[:80])
+    return {"status": "proposed", "action": action}
+
+
+@app.get("/lina/actions/pending")
+async def pending_actions(user_id: str | None = None, limit: int = 50):
+    if _action_store is None:
+        raise HTTPException(503, "action store not initialized")
+    return {"pending": await _action_store.pending(user_id, limit)}
+
+
+@app.post("/lina/actions/{action_id}/approve")
+async def approve_action(action_id: str, req: ActionUserRequest):
+    """Approve a pending proposal — she executes it. Idempotent by claim."""
+    if _action_store is None:
+        raise HTTPException(503, "action store not initialized")
+    row = await _action_store.claim(action_id)
+    if row is None:
+        existing = await _action_store.get(action_id)
+        if existing and existing["status"] in ("executed", "failed"):
+            return {"status": existing["status"], "output": existing["executed_output"]}
+        if existing and existing["status"] == "rejected":
+            raise HTTPException(409, "action was rejected")
+        raise HTTPException(404, "pending action not found")
+
+    result = await execute_action(row)
+    await _action_store.finalize(action_id, result["ok"], result["output"])
+    status = "executed" if result["ok"] else "failed"
+    _emit_event("action", id=action_id, status=status, type=row["action_type"])
+    log.info(
+        "[actions] %s approved %s → %s (%s)",
+        req.user_id, row["action_type"], status, row["description"][:60],
+    )
+    return {"status": status, "output": result["output"]}
+
+
+@app.post("/lina/actions/{action_id}/reject")
+async def reject_action(action_id: str, req: ActionUserRequest):
+    if _action_store is None:
+        raise HTTPException(503, "action store not initialized")
+    row = await _action_store.reject(action_id, req.user_id)
+    if row is None:
+        raise HTTPException(404, "pending action not found")
+    _emit_event("action", id=action_id, status="rejected", type=row["action_type"])
+    log.info("[actions] %s rejected %s: %s", req.user_id, row["action_type"], row["description"][:60])
+    return {"status": "rejected", "action": row["id"]}
+
+
+@app.post("/lina/actions/{action_id}/modify")
+async def modify_action(action_id: str, req: ModifyActionRequest):
+    """Modify a pending proposal's payload, then execute the modified version."""
+    if _action_store is None:
+        raise HTTPException(503, "action store not initialized")
+    row = await _action_store.modify(action_id, req.payload)
+    if row is None:
+        raise HTTPException(404, "pending action not found")
+    claimed = await _action_store.claim(action_id)
+    if claimed is None:
+        raise HTTPException(409, "action changed while modifying")
+    result = await execute_action(claimed)
+    await _action_store.finalize(action_id, result["ok"], result["output"])
+    status = "executed" if result["ok"] else "failed"
+    _emit_event("action", id=action_id, status=status, type=row["action_type"], modified=True)
+    log.info("[actions] %s modified+approved %s → %s", claimed["user_id"], row["action_type"], status)
+    return {"status": status, "output": result["output"]}
+
+
+@app.get("/lina/actions")
+async def action_audit(user_id: str | None = None, limit: int = 50):
+    if _action_store is None:
+        raise HTTPException(503, "action store not initialized")
+    return {"actions": await _action_store.audit(user_id, limit)}
+
+
+# =============================================================================
+# TELEMETRY & OBSERVABILITY (Phase 3 — the dashboard's live feed)
+# =============================================================================
+
+@app.get("/lina/telemetry")
+async def telemetry():
+    recent_actions = []
+    if _action_store is not None:
+        recent_actions = await _action_store.recent(limit=10)
+    return {
+        "uptime_seconds": metrics.uptime_seconds(),
+        "voice_providers": (v.names if (v := _context_get("voice_pool")) else []),
+        "bridge_available": _bridge_available(),
+        "counters": metrics.summary(),
+        "events": list(LINA_EVENT_RING)[-200:],
+        "recent_actions": recent_actions,
+        "log_file": os.path.join(LINA_LOG_DIR, "lina.log") if LINA_LOG_DIR else None,
+    }
+
+
+@app.get("/lina/telemetry/stream")
+async def telemetry_stream(request: Request):
+    """Server-Sent Events: live log lines and action lifecycle transitions."""
+
+    async def event_gen():
+        index = 0
+        while True:
+            if await request.is_disconnected():
+                break
+            ring = list(LINA_EVENT_RING)
+            if index < len(ring):
+                for event in ring[index:]:
+                    yield f"data: {json.dumps(event)}\n\n"
+                index = len(ring)
+            else:
+                yield ": ping\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+# =============================================================================
+# PWA SHELL (Phase 3 — her interface, served by her own service)
+# =============================================================================
+
+if os.path.isdir(PWA_DIR):
+    app.mount("/pwa", StaticFiles(directory=PWA_DIR, html=True), name="pwa")
+    log.info("[pwa] shell served from %s at /pwa", PWA_DIR)
+else:
+    log.warning("[pwa] PWA_DIR %s missing — shell not mounted", PWA_DIR)
+
+
+# =============================================================================
 # AIOMISC SERVICES — the unified lifecycle umbrella
 #
 #   entrypoint
@@ -2132,11 +2438,12 @@ class LINAIdentityService(UvicornService):
 
 
 class IPCBridgeService(Service):
-    """Owns the dual-chamber IPC bridge (Triton substrate) lifecycle.
+    """Owns the dual-chamber IPC (the table) lifecycle.
 
-    Allocates shared memory at start, publishes the bridge for the FastAPI
-    app, and resets it cleanly at stop. Missing extension or allocation
-    failure is logged and tolerated — the system runs without the bridge.
+    Allocates the shared-memory chambers at start, publishes the bridge for
+    the FastAPI app, and resets it cleanly at stop. Allocation is eager and
+    loud: if a chamber cannot be mapped, the service raises and the
+    entrypoint stops all services — no silent fallback mode.
     """
 
     def __init__(
@@ -2151,35 +2458,21 @@ class IPCBridgeService(Service):
         self.bridge = None
 
     async def start(self) -> None:
-        global _bridge_service
-        if ipc_bridge is None:
-            log.warning("[IPC] extension unavailable — running without the bridge")
-            _bridge_service = self
-            return
-        try:
-            if self.tx_path or self.rx_path:
-                self.bridge = ipc_bridge.IPCBridge(self.tx_path, self.rx_path)
-            else:
-                self.bridge = ipc_bridge.IPCBridge()
-            if self.bridge.available():
-                log.info(
-                    f"[IPC] dual-chamber bridge live — "
-                    f"TX {self.bridge.tx_path()}, RX {self.bridge.rx_path()}"
-                )
-            else:
-                log.warning("[IPC] shared-memory allocation failed — running without the bridge")
-        except Exception as exc:
-            log.warning(f"[IPC] bridge init failed ({exc}) — running without the bridge")
-            self.bridge = None
-        _bridge_service = self
+        if self.tx_path or self.rx_path:
+            self.bridge = ipc.IPCBridge(self.tx_path, self.rx_path)
+        else:
+            self.bridge = ipc.IPCBridge()
+        log.info(
+            f"[IPC] chambers live — TX {self.bridge.tx_path()}, RX {self.bridge.rx_path()}"
+        )
+        # Publish into the loop's Context — consumers resolve via get_context().
+        self.context["bridge_service"] = self
 
     async def stop(self, exception: Exception | None = None) -> None:
-        global _bridge_service
         if self.bridge is not None:
             self.bridge.reset()
             self.bridge = None
             log.info("[IPC] bridge shut down cleanly")
-        _bridge_service = None
 
 
 class VoicePoolService(Service):
@@ -2203,7 +2496,6 @@ class VoicePoolService(Service):
         self.pool: VoicePool | None = None
 
     async def start(self) -> None:
-        global _voice_pool
         self.pool = build_voice_pool_from_env(
             primary=self.default_provider,
             max_concurrent=self.max_concurrent,
@@ -2212,7 +2504,8 @@ class VoicePoolService(Service):
         self.pool._on_fallback = (
             lambda name: metrics.inc("lina_voice_fallbacks_total", {"provider": name})
         )
-        _voice_pool = self.pool
+        # Publish into the loop's Context — consumers resolve via get_context().
+        self.context["voice_pool"] = self.pool
         if not self.pool.providers:
             log.warning(
                 "[voice] no providers configured — LINA is silent until an "
@@ -2227,8 +2520,6 @@ class VoicePoolService(Service):
             )
 
     async def stop(self, exception: Exception | None = None) -> None:
-        global _voice_pool
-        _voice_pool = None
         if self.pool is not None:
             await self.pool.aclose()
             log.info("[voice] pool shut down cleanly")
@@ -2249,7 +2540,7 @@ class HeartbeatService(PeriodicService):
         log.info(
             "[heartbeat] alive — uptime=%.0fs voices=%s bridge=%s",
             metrics.uptime_seconds(),
-            ",".join(_voice_pool.names) if _voice_pool else "none",
+            ",".join(v.names) if (v := _context_get("voice_pool")) else "none",
             "up" if _bridge_available() else "down",
         )
 

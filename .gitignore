@@ -30,5 +30,13 @@ backend/triton/target/
 backend/ipc/python/ipc_bridge/*.so
 # Cargo.lock files are committed for reproducible Docker builds
 
+# Runtime state — her desk (structure tracked, contents local)
+runtime/logs/*
+runtime/state/*
+runtime/ipc/*
+runtime/workspace/*
+!runtime/**/.gitkeep
+!runtime/README.md
+
 # OS files
 thumbs.db

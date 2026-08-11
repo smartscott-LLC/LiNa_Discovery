@@ -10,10 +10,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 from .base import AIProvider, VoicePoolError
-from .claude import ClaudeProvider
 from .deepseek import DeepSeekProvider
 from .gemini import GeminiProvider
 from .openrouter import OpenRouterProvider
@@ -25,7 +24,6 @@ PROVIDER_BUILDERS: dict[str, type[AIProvider]] = {
     "deepseek": DeepSeekProvider,
     "openrouter": OpenRouterProvider,
     "gemini": GeminiProvider,
-    "claude": ClaudeProvider,
 }
 
 
@@ -40,7 +38,7 @@ class VoicePool:
         self,
         providers: list[AIProvider],
         max_concurrent: int = 4,
-        on_fallback: Optional[Callable[[str], None]] = None,
+        on_fallback: Callable[[str], None] | None = None,
     ) -> None:
         if not providers:
             log.warning("[voice] empty pool — no instruments configured")
@@ -110,8 +108,6 @@ def build_provider(name: str, *, base_url: str | None = None, model: str | None 
         return None
     try:
         # AI_BASE_URL / AI_MODEL override the primary provider's endpoint/model.
-        if name == "claude":
-            return builder(model=model)
         return builder(base_url=base_url, model=model)
     except ValueError as exc:
         log.info(f"[voice] {name} not configured: {exc}")
