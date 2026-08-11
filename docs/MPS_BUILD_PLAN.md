@@ -15,7 +15,10 @@ document supersedes the baseline where they differ.
   layer, promotion log, migration)
 - ✅ **Phase C — Formation** (reflection cadence, triggers, sovereignty; verified
   end-to-end with a live conversation)
-- 🚧 **Phase D — Consolidation** (48h sweep + fallout) — *in progress*
+- ✅ **Phase D — Consolidation** (48h sweep + fallout; snapshot semantics; orphan
+  handling; verified live across two sweeps)
+- 🚧 **Phase E — Maintenance** (monthly re-evaluation, subconscious slope, yearly
+  legacy review) — *in progress*
 
 ## Phase A — Value mechanics (pure logic, additive, zero live-system risk)
 - `MemoryDial` — the add/subtract mechanism: bounded Δ (−3 … +3), absolute floor

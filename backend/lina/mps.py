@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Callable
@@ -29,6 +30,7 @@ from value_engine import (
     GATE_T2_TO_T3,
     GATE_TO_LONG_TERM,
     TRIGGER_RETENTION_FLOOR,
+    MemoryDial,
     create_value_engine_for_user,
     geometric_significance,
     score_memory,
@@ -625,4 +627,343 @@ class MemoryConsolidationService(PeriodicService):
                 await cache.delete(key)
                 counts["purged"] += 1
 
+        return counts
+
+
+# =============================================================================
+# LONG-TERM MAINTENANCE — the monthly re-evaluation + the subconscious slope
+# (MPS §2, Phase E)
+# =============================================================================
+
+# The retention line mirrors floor_policy.retention_line (4.0) — the law's
+# record of the character floor. The subconscious slope is the flat-tire
+# memory: unused for ~1–2 years → gone, and she must be taught again.
+SUBCONSCIOUS_LINE = 4.0      # below this, an active memory slips to the subconscious
+LEGACY_ENTER     = 9.5       # at/above this, an active memory earns the crown jewels
+LEGACY_FLOOR     = 8.0       # below this at the yearly review, an unprotected legacy slips out
+GONE_LINE        = 0.5       # the subconscious slope's floor: below this, gone
+SLOPE_HALF_LIFE_DAYS = 200.0 # the score halves every ~200 idle days
+SLOPE_GONE_DAYS   = 730      # hard cap: ~2 years idle, gone regardless
+SLOPE_LAMBDA      = math.log(2) / SLOPE_HALF_LIFE_DAYS
+
+# Usage feedback — the automatic consolidation's dial turn (MPS §4, §6).
+REFERENCE_REWARD = ((3, 1.0), (10, 1.5), (25, 2.0))
+AGE_PENALTY_NEVER_REFERENCED = ((180, -2.0), (90, -1.0))
+RECENT_REWARD_DAYS = 30
+RECENT_REWARD = 0.5
+
+
+def maintenance_delta(
+    reference_count: int,
+    last_referenced_at: datetime | None,
+    created_at: datetime | None,
+    now: datetime,
+) -> float:
+    """The automatic consolidation's dial turn: usage rewards, age penalties.
+
+    A memory she keeps returning to strengthens; one she never reaches for
+    fades. Bounded by the dial's ±3 per pass.
+    """
+    delta = 0.0
+    refs = reference_count or 0
+    for threshold, reward in REFERENCE_REWARD:
+        if refs >= threshold:
+            delta = max(delta, reward)
+    if last_referenced_at is not None:
+        days = max((now - last_referenced_at).days, 0)
+        if days <= RECENT_REWARD_DAYS:
+            delta += RECENT_REWARD
+    elif created_at is not None:
+        # Never referenced — age against creation.
+        age = max((now - created_at).days, 0)
+        for threshold, penalty in AGE_PENALTY_NEVER_REFERENCED:
+            if age >= threshold:
+                delta = min(delta, penalty)
+                break
+    return round(delta, 2)
+
+
+def apply_monthly(row: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """The monthly re-evaluation for one active item (MPS §2, Phase E).
+
+    The automatic consolidation always runs — the brain consolidates even
+    when the review is skipped; skipping the review is what forfeits.
+    Floors are absolute: the character set cannot be devalued below
+    retention.
+
+    Routing: at/above LEGACY_ENTER → legacy; below SUBCONSCIOUS_LINE → the
+    subconscious slope begins; otherwise stays active.
+    """
+    score = float(row["importance_score"])
+    floor = float(row.get("floor") or 0.0)
+    if row.get("must_keep"):
+        floor = score  # immovable
+    delta = maintenance_delta(
+        reference_count=row.get("reference_count") or 0,
+        last_referenced_at=row.get("last_referenced_at"),
+        created_at=row.get("created_at"),
+        now=now,
+    )
+    new_score = MemoryDial.adjust(score, delta, floor=floor)
+    entry = {
+        "delta": delta, "before": score, "after": new_score,
+        "at": now.isoformat(), "reason": "monthly re-evaluation",
+    }
+    if new_score >= LEGACY_ENTER:
+        return {
+            "score": new_score, "status": "legacy", "decay_started_at": None,
+            "entry": entry,
+            "log": ("active", "legacy", "Earned the crown — score rose to the legacy line"),
+        }
+    if new_score < SUBCONSCIOUS_LINE:
+        return {
+            "score": new_score, "status": "subconscious", "decay_started_at": now,
+            "entry": entry,
+            "log": ("active", "subconscious", "Slipped below the retention line — the subconscious slope begins"),
+        }
+    return {"score": new_score, "status": "active", "decay_started_at": None, "entry": entry, "log": None}
+
+
+def slope_effective(row: dict[str, Any], now: datetime) -> tuple[float, bool]:
+    """The subconscious degradation slope: d(score)/dt = −λ·score.
+
+    The anchor is the latest of decay_started_at, last_referenced_at, and
+    created_at — recall re-stokes the clock, so a memory that is reached
+    for again stops decaying from that moment. Returns (effective_score,
+    gone). Gone means the row is deleted: forgotten, and she must be taught
+    again.
+    """
+    score = float(row["importance_score"])
+    floor = float(row.get("floor") or 0.0)
+    candidates = [row.get("decay_started_at"), row.get("last_referenced_at"), row.get("created_at")]
+    anchor = max((c for c in candidates if c is not None), default=None)
+    if anchor is None:
+        return score, False
+    idle_days = max((now - anchor).days, 0)
+    if idle_days >= SLOPE_GONE_DAYS:
+        return 0.0, True
+    effective = score * math.exp(-SLOPE_LAMBDA * idle_days)
+    if effective < GONE_LINE:
+        return 0.0, True
+    return max(effective, floor), False
+
+
+def apply_legacy_review(row: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """The yearly review of the legacy tier (MPS §2, Phase E).
+
+    The crown is protected and never demoted — what she cannot forget
+    defines her character. An unprotected legacy memory that no longer
+    earns its place slips to the subconscious.
+    """
+    score = float(row["importance_score"])
+    floor = float(row.get("floor") or 0.0)
+    if row.get("must_keep"):
+        floor = score
+    delta = maintenance_delta(
+        reference_count=row.get("reference_count") or 0,
+        last_referenced_at=row.get("last_referenced_at"),
+        created_at=row.get("created_at"),
+        now=now,
+    )
+    entry = {
+        "delta": delta, "before": score,
+        "at": now.isoformat(), "reason": "yearly legacy review",
+    }
+    if row.get("protected"):
+        new_score = MemoryDial.adjust(score, delta, floor=floor)
+        entry["after"] = new_score
+        return {"score": new_score, "status": "legacy", "decay_started_at": None, "entry": entry, "log": None}
+    new_score = MemoryDial.adjust(score, delta, floor=0.0)
+    entry["after"] = new_score
+    if new_score < LEGACY_FLOOR:
+        return {
+            "score": new_score, "status": "subconscious", "decay_started_at": now,
+            "entry": entry,
+            "log": ("legacy", "subconscious", "No longer earning the crown — slipped to the subconscious"),
+        }
+    return {"score": new_score, "status": "legacy", "decay_started_at": None, "entry": entry, "log": None}
+
+
+class MemoryMaintenanceService(PeriodicService):
+    """The monthly re-evaluation — the long-term valuation (MPS §2, Phase E).
+
+    Every 30 days: active items get the automatic consolidation's dial turn
+    (usage rewards, age penalties, floors absolute), routed to legacy or the
+    subconscious; subconscious items ride the degradation slope — and the
+    ones no one has reached for in ~1–2 years are forgotten. Gone. No record.
+    """
+
+    def __init__(
+        self,
+        *,
+        interval: float = 30 * 24 * 3600,
+        delay: float = 0.0,
+        db_provider: Callable[[], Any] | None = None,
+        cache_provider: Callable[[], Any] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(interval=interval, delay=delay, **kwargs)
+        self.db_provider = db_provider
+        self.cache_provider = cache_provider
+
+    async def start(self) -> None:
+        self.context["mps_maintenance"] = self
+        log.info(f"[mps] maintenance service live — monthly re-evaluation every {self.interval / 86400:.0f}d")
+
+    def _db(self) -> Any:
+        db = self.db_provider() if self.db_provider else None
+        if db is None:
+            raise RuntimeError("database pool not initialized")
+        return db
+
+    async def callback(self) -> None:
+        try:
+            counts = await self.run_maintenance()
+            log.info(
+                "[mps] monthly re-evaluation complete — adjusted=%d to_subconscious=%d "
+                "to_legacy=%d decayed=%d forgotten=%d",
+                counts["adjusted"], counts["to_subconscious"],
+                counts["to_legacy"], counts["decayed"], counts["forgotten"],
+            )
+        except Exception as exc:
+            log.warning(f"[mps] monthly re-evaluation failed: {exc}")
+
+    async def run_maintenance(self, now: datetime | None = None) -> dict[str, int]:
+        """One monthly pass: the re-evaluation + the subconscious slope."""
+        now = now or datetime.now(UTC)
+        db = self._db()
+        counts = {"adjusted": 0, "to_subconscious": 0, "to_legacy": 0, "decayed": 0, "forgotten": 0}
+
+        # 1. Active items — the monthly re-evaluation (the dial, floors held).
+        active = await db.fetch("SELECT * FROM lina_memory_items WHERE status = 'active'")
+        for row in active:
+            decision = apply_monthly(row, now)
+            if decision["log"]:
+                from_s, to_s, reason = decision["log"]
+                await _log_promotion(
+                    db, user_id=row["user_id"], item_id=row["item_id"],
+                    from_stage=from_s, to_stage=to_s, score=decision["score"], reason=reason,
+                )
+                if to_s == "subconscious":
+                    counts["to_subconscious"] += 1
+                else:
+                    counts["to_legacy"] += 1
+            await db.execute(
+                """
+                UPDATE lina_memory_items SET
+                    importance_score = $2,
+                    score_history = score_history || $3::jsonb,
+                    status = $4,
+                    decay_started_at = $5,
+                    updated_at = NOW()
+                WHERE item_id = $1
+                """,
+                row["item_id"], decision["score"],
+                json.dumps([decision["entry"]]),
+                decision["status"], decision["decay_started_at"],
+            )
+            counts["adjusted"] += 1
+
+        # 2. Subconscious items — the degradation slope.
+        subconscious = await db.fetch("SELECT * FROM lina_memory_items WHERE status = 'subconscious'")
+        for row in subconscious:
+            effective, gone = slope_effective(row, now)
+            if gone:
+                # Forgotten. Gone. No record.
+                await db.execute(
+                    "DELETE FROM lina_memory_items WHERE item_id = $1", row["item_id"]
+                )
+                counts["forgotten"] += 1
+                continue
+            before = float(row["importance_score"])
+            entry = {
+                "delta": round(effective - before, 4), "before": before,
+                "after": effective, "at": now.isoformat(), "reason": "subconscious decay",
+            }
+            await db.execute(
+                """
+                UPDATE lina_memory_items SET
+                    importance_score = $2,
+                    score_history = score_history || $3::jsonb,
+                    updated_at = NOW()
+                WHERE item_id = $1
+                """,
+                row["item_id"], effective, json.dumps([entry]),
+            )
+            counts["decayed"] += 1
+
+        return counts
+
+
+class LegacyReviewService(PeriodicService):
+    """The yearly review of the legacy tier (MPS §2, Phase E).
+
+    The crown jewels are evaluated yearly. The protected crown is never
+    demoted — what she cannot forget defines her character. An unprotected
+    legacy memory that no longer earns its place slips to the subconscious.
+    """
+
+    def __init__(
+        self,
+        *,
+        interval: float = 365 * 24 * 3600,
+        delay: float = 0.0,
+        db_provider: Callable[[], Any] | None = None,
+        cache_provider: Callable[[], Any] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(interval=interval, delay=delay, **kwargs)
+        self.db_provider = db_provider
+        self.cache_provider = cache_provider
+
+    async def start(self) -> None:
+        self.context["mps_legacy_review"] = self
+        log.info(f"[mps] legacy review service live — yearly review every {self.interval / 86400:.0f}d")
+
+    def _db(self) -> Any:
+        db = self.db_provider() if self.db_provider else None
+        if db is None:
+            raise RuntimeError("database pool not initialized")
+        return db
+
+    async def callback(self) -> None:
+        try:
+            counts = await self.run_review()
+            log.info(
+                "[mps] legacy review complete — reviewed=%d demoted=%d",
+                counts["reviewed"], counts["demoted"],
+            )
+        except Exception as exc:
+            log.warning(f"[mps] legacy review failed: {exc}")
+
+    async def run_review(self, now: datetime | None = None) -> dict[str, int]:
+        """One yearly pass over the legacy tier."""
+        now = now or datetime.now(UTC)
+        db = self._db()
+        counts = {"reviewed": 0, "demoted": 0}
+        legacy = await db.fetch("SELECT * FROM lina_memory_items WHERE status = 'legacy'")
+        for row in legacy:
+            decision = apply_legacy_review(row, now)
+            if decision["log"]:
+                from_s, to_s, reason = decision["log"]
+                await _log_promotion(
+                    db, user_id=row["user_id"], item_id=row["item_id"],
+                    from_stage=from_s, to_stage=to_s, score=decision["score"], reason=reason,
+                )
+                counts["demoted"] += 1
+            await db.execute(
+                """
+                UPDATE lina_memory_items SET
+                    importance_score = $2,
+                    score_history = score_history || $3::jsonb,
+                    status = $4,
+                    decay_started_at = $5,
+                    updated_at = NOW()
+                WHERE item_id = $1
+                """,
+                row["item_id"], decision["score"],
+                json.dumps([decision["entry"]]),
+                decision["status"], decision["decay_started_at"],
+            )
+            counts["reviewed"] += 1
         return counts

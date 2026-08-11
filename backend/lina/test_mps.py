@@ -12,13 +12,21 @@ sys.path.insert(0, "/home/server/LiNa_Discovery/backend/lina")
 
 import pytest  # noqa: E402
 
+from datetime import UTC, datetime, timedelta  # noqa: E402
+
 from mps import (  # noqa: E402
+    LegacyReviewService,
     MemoryConsolidationService,
     MemoryFormationService,
+    MemoryMaintenanceService,
+    apply_legacy_review,
+    apply_monthly,
     build_item,
     form_items,
+    maintenance_delta,
     reflect_messages,
     route_item,
+    slope_effective,
     store_long_term,
 )
 from value_engine import (  # noqa: E402
@@ -38,6 +46,7 @@ class FakeDB:
     def __init__(self) -> None:
         self.executes: list[tuple[str, tuple]] = []
         self.fetched: Any = None
+        self.fetch_rows: list[dict[str, Any]] = []
 
     async def execute(self, sql: str, *args: Any) -> str:
         self.executes.append((sql, args))
@@ -47,7 +56,7 @@ class FakeDB:
         return self.fetched
 
     async def fetch(self, sql: str, *args: Any) -> list[Any]:
-        return []
+        return self.fetch_rows
 
 
 class FakeCache:
@@ -415,3 +424,157 @@ class TestSweep:
         assert counts["to_long_term"] == 0
         assert counts["purged"] == 1
         assert "lina:mps:t3:orphan" not in cache.store
+
+
+class TestMaintenance:
+    """Phase E — the monthly re-evaluation and the subconscious slope."""
+
+    NOW = datetime(2026, 8, 11, tzinfo=UTC)
+
+    def _row(self, score: float, **extra: Any) -> dict[str, Any]:
+        base = {
+            "item_id": "m-1", "user_id": "u1", "importance_score": score,
+            "floor": 0.0, "protected": False, "must_keep": False,
+            "status": "active", "reference_count": 0,
+            "last_referenced_at": None, "created_at": self.NOW,
+            "decay_started_at": None,
+        }
+        base.update(extra)
+        return base
+
+    def test_maintenance_delta_rewards_usage(self):
+        assert maintenance_delta(3, self.NOW, self.NOW, self.NOW) >= 1.0
+        assert maintenance_delta(25, self.NOW, self.NOW, self.NOW) >= 2.0
+
+    def test_maintenance_delta_penalizes_neglect(self):
+        old = self.NOW - timedelta(days=200)
+        # Never referenced, 200 days old → the deep penalty.
+        assert maintenance_delta(0, None, old, self.NOW) <= -2.0
+        mid = self.NOW - timedelta(days=100)
+        assert maintenance_delta(0, None, mid, self.NOW) <= -1.0
+
+    def test_monthly_stays_active_when_fresh(self):
+        row = self._row(6.0)
+        decision = apply_monthly(row, self.NOW)
+        assert decision["status"] == "active"
+        assert decision["score"] == 6.0
+        assert decision["log"] is None
+
+    def test_monthly_slips_to_subconscious(self):
+        old = self.NOW - timedelta(days=200)
+        row = self._row(5.0, created_at=old)
+        decision = apply_monthly(row, self.NOW)
+        assert decision["status"] == "subconscious"
+        assert decision["decay_started_at"] is not None
+        assert decision["log"] == ("active", "subconscious", decision["log"][2])
+
+    def test_monthly_floor_holds_for_protected(self):
+        # The character floor: a protected item can never slip to the subconscious.
+        old = self.NOW - timedelta(days=400)
+        row = self._row(7.6, protected=True, floor=7.5, created_at=old)
+        decision = apply_monthly(row, self.NOW)
+        assert decision["status"] == "active"
+        assert decision["score"] >= 7.5
+
+    def test_monthly_must_keep_immovable(self):
+        old = self.NOW - timedelta(days=400)
+        row = self._row(10.0, must_keep=True, created_at=old)
+        decision = apply_monthly(row, self.NOW)
+        assert decision["score"] == 10.0
+
+    def test_monthly_can_earn_legacy(self):
+        row = self._row(8.2, reference_count=25, last_referenced_at=self.NOW)
+        decision = apply_monthly(row, self.NOW)
+        assert decision["status"] == "legacy"
+        assert decision["log"][1] == "legacy"
+
+    def test_slope_decays(self):
+        old = self.NOW - timedelta(days=100)
+        row = self._row(5.0, status="subconscious", created_at=old,
+                        decay_started_at=old)
+        effective, gone = slope_effective(row, self.NOW)
+        assert not gone
+        assert effective < 5.0 and effective > 3.0
+
+    def test_slope_forgets_after_long_idle(self):
+        old = self.NOW - timedelta(days=800)
+        row = self._row(5.0, status="subconscious", created_at=old,
+                        decay_started_at=old)
+        effective, gone = slope_effective(row, self.NOW)
+        assert gone
+        assert effective == 0.0
+
+    def test_slope_reference_re_stokes(self):
+        # Recall re-stokes the clock: anchored at the latest reference.
+        old = self.NOW - timedelta(days=800)
+        row = self._row(5.0, status="subconscious", created_at=old,
+                        decay_started_at=old,
+                        last_referenced_at=self.NOW - timedelta(days=10))
+        effective, gone = slope_effective(row, self.NOW)
+        assert not gone
+        assert effective > 4.5
+
+    def test_legacy_protected_crown_holds(self):
+        old = self.NOW - timedelta(days=800)
+        row = self._row(8.0, status="legacy", protected=True, floor=7.5, created_at=old)
+        decision = apply_legacy_review(row, self.NOW)
+        assert decision["status"] == "legacy"
+        assert decision["log"] is None
+
+    def test_legacy_unprotected_demoted(self):
+        old = self.NOW - timedelta(days=800)
+        row = self._row(8.0, status="legacy", protected=False, created_at=old)
+        decision = apply_legacy_review(row, self.NOW)
+        assert decision["status"] == "subconscious"
+        assert decision["log"][0] == "legacy"
+
+    def test_maintenance_service_updates_and_logs(self):
+        db = FakeDB()
+        old = self.NOW - timedelta(days=200)
+        db.fetch_rows = [
+            self._row(5.0, item_id="m-slip", created_at=old),
+            self._row(6.0, item_id="m-keep"),
+        ]
+        svc = MemoryMaintenanceService(
+            interval=3600, db_provider=lambda: db, cache_provider=lambda: FakeCache(),
+        )
+        counts = asyncio.run(svc.run_maintenance(now=self.NOW))
+        assert counts["adjusted"] == 2
+        assert counts["to_subconscious"] == 1
+        # The slip is logged; the keep is not.
+        promo = [args for sql, args in db.executes if "lina_promotion_log" in sql]
+        assert len(promo) == 1
+        assert promo[0][2] == "active" and promo[0][3] == "subconscious"
+
+    def test_maintenance_service_forgets(self):
+        db = FakeDB()
+        old = self.NOW - timedelta(days=800)
+        db.fetch_rows = [
+            {"item_id": "m-gone", "user_id": "u1", "importance_score": 5.0,
+             "floor": 0.0, "status": "subconscious", "created_at": old,
+             "decay_started_at": old,
+             "last_referenced_at": None, "must_keep": False},
+        ]
+        svc = MemoryMaintenanceService(
+            interval=3600, db_provider=lambda: db, cache_provider=lambda: FakeCache(),
+        )
+        counts = asyncio.run(svc.run_maintenance(now=self.NOW))
+        assert counts["forgotten"] == 1
+        deletes = [sql for sql, _ in db.executes if "DELETE" in sql]
+        assert len(deletes) == 1
+
+    def test_legacy_service_reviews(self):
+        db = FakeDB()
+        db.fetch_rows = [
+            {"item_id": "m-crown", "user_id": "u1", "importance_score": 8.0,
+             "floor": 7.5, "protected": True, "must_keep": False,
+             "status": "legacy", "reference_count": 0, "last_referenced_at": None,
+             "created_at": self.NOW - timedelta(days=800), "decay_started_at": None},
+        ]
+        svc = LegacyReviewService(
+            interval=3600, db_provider=lambda: db, cache_provider=lambda: FakeCache(),
+        )
+        counts = asyncio.run(svc.run_review(now=self.NOW))
+        assert counts["reviewed"] == 1 and counts["demoted"] == 0
+        updates = [args for sql, args in db.executes if "UPDATE" in sql]
+        assert updates and updates[0][3] == "legacy"

@@ -120,8 +120,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from mps import (
+    LegacyReviewService,
     MemoryConsolidationService,
     MemoryFormationService,
+    MemoryMaintenanceService,
     form_items,
     reflect_messages,
 )
@@ -1906,6 +1908,32 @@ async def sweep_endpoint():
     return await run_sweep_now()
 
 
+async def run_maintenance_now():
+    """Run the monthly re-evaluation on demand (ops/observation)."""
+    svc = _context_get("mps_maintenance")
+    if svc is None:
+        raise HTTPException(503, "maintenance service is not in the loop")
+    counts = await svc.run_maintenance()
+    log.info(f"[mps] monthly re-evaluation invoked on demand — {counts}")
+    return counts
+
+
+@app.post("/lina/memory/maintenance")
+async def maintenance_endpoint():
+    return await run_maintenance_now()
+
+
+@app.post("/lina/memory/legacy-review")
+async def legacy_review_endpoint():
+    """Run the yearly legacy review on demand (ops/observation)."""
+    svc = _context_get("mps_legacy_review")
+    if svc is None:
+        raise HTTPException(503, "legacy review service is not in the loop")
+    counts = await svc.run_review()
+    log.info(f"[mps] legacy review invoked on demand — {counts}")
+    return counts
+
+
 @app.post("/lina/feedback/flag")
 async def flag_miscalibration(req: FlagRequest):
     """
@@ -2561,6 +2589,20 @@ def main() -> None:
         # (00:00 every other day) so the global cadence never drifts.
         MemoryConsolidationService(
             interval=48 * 3600,
+            delay=_seconds_to_next_midnight(),
+            db_provider=lambda: db_pool,
+            cache_provider=lambda: cache,
+        ),
+        # The long-term clocks: the monthly re-evaluation (the dial, the
+        # subconscious slope) and the yearly legacy review of the crown.
+        MemoryMaintenanceService(
+            interval=30 * 24 * 3600,
+            delay=_seconds_to_next_midnight(),
+            db_provider=lambda: db_pool,
+            cache_provider=lambda: cache,
+        ),
+        LegacyReviewService(
+            interval=365 * 24 * 3600,
             delay=_seconds_to_next_midnight(),
             db_provider=lambda: db_pool,
             cache_provider=lambda: cache,
