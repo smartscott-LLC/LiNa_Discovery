@@ -40,3 +40,10 @@ runtime/workspace/*
 
 # OS files
 thumbs.db
+docs/arrangement.py
+docs/linear_tensor_constraints.py
+docs/ppl_lattice_polytope.py
+docs/ambient_space.py
+
+# Progenitor reference material (raw; keepers distilled into docs/MPS_ARCHITECTURE.md)
+reference_memoru/

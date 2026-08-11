@@ -1185,6 +1185,58 @@ class ImportanceScorer:
             return 0   # Do not form
 
 
+def geometric_significance(
+    alignment_score: float | None,
+    was_corrected: bool = False,
+    zone: str = "aligned",
+) -> float:
+    """Geometric funding factor (0–10): how significant this moment is in
+    ethical space — the value engine's direct contribution to memory formation
+    (MPS architecture §4).
+
+    Higher when the moment lived near a boundary (the ethics were tested) or
+    required correction. alignment_score is 0.0 on a boundary and 1.0 at the
+    center, so proximity inverts it. Zone and correction add weight for moments
+    the polytope had to arbitrate. Novelty in ethical space (how new this
+    region is) is a Phase F refinement fed by the evaluation history; the base
+    here is boundary proximity + correction + zone.
+    """
+    proximity = (1.0 - alignment_score) * 10.0 if alignment_score is not None else 0.0
+    significance = proximity
+    if was_corrected:
+        significance += 2.0
+    if zone in ("violation", "acceptable_variance"):
+        significance += 1.0
+    return min(10.0, max(0.0, significance))
+
+
+class MemoryDial:
+    """The add/subtract mechanism of the valuation (MPS architecture §4).
+
+    Her reflection proposes a delta; the value engine arbitrates; the floor is
+    absolute. The character set cannot be devalued below retention — for
+    must-keeps the floor is the score itself, so nothing moves it.
+    """
+
+    DELTA_MIN = -3.0
+    DELTA_MAX = 3.0
+
+    @staticmethod
+    def clamp_delta(delta: float) -> float:
+        """Bound a proposed adjustment to the dial's range."""
+        return max(MemoryDial.DELTA_MIN, min(MemoryDial.DELTA_MAX, delta))
+
+    @staticmethod
+    def adjust(score: float, delta: float, floor: float = 0.0) -> float:
+        """Apply a bounded adjustment; never below the floor.
+
+        floor=0.0 (default): an item may decay to zero (purge territory).
+        floor=score: a must-keep — the floor equals the score, so the dial
+        cannot move it (e.g. a baby's diaper change, safety, health).
+        """
+        return max(floor, score + MemoryDial.clamp_delta(delta))
+
+
 # =============================================================================
 # DATABASE INTEGRATION
 # Async PostgreSQL interface for loading constraints and logging evaluations.

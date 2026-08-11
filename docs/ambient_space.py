@@ -9,12 +9,13 @@ Ambient lattices and ambient spaces
 #  Distributed under the terms of the GNU General Public License (GPL)
 #                  https://www.gnu.org/licenses/
 # ***************************************************************************
-from sage.misc.cachefunc import cached_method
+from sage.categories.homset import End
 from sage.combinat.free_module import CombinatorialFreeModule
-from .weight_lattice_realizations import WeightLatticeRealizations
+from sage.misc.cachefunc import cached_method
 from sage.rings.integer_ring import ZZ
 from sage.rings.rational_field import QQ
-from sage.categories.homset import End
+
+from .weight_lattice_realizations import WeightLatticeRealizations
 
 
 class AmbientSpace(CombinatorialFreeModule):
