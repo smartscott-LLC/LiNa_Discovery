@@ -119,6 +119,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from mps import MemoryFormationService, form_items, reflect_messages
 from pydantic import BaseModel
 
 import metrics
@@ -126,7 +127,6 @@ from actions import ActionError, ActionStore, configured_roots, execute_action
 from providers import VoicePool, VoicePoolError, build_voice_pool_from_env
 from value_engine import (
     DIMENSION_NAMES,
-    ImportanceScorer,
     LINAValueStore,
     PolytopeConstraints,
     SeasonAdvancementEvaluator,
@@ -224,12 +224,8 @@ METRICS_ENABLED = os.getenv("METRICS_ENABLED", "").lower() in ("1", "true", "yes
 HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "").lower() in ("1", "true", "yes")
 HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "30"))
 
-# Memory formation thresholds (mirrors ImportanceScorer)
-THRESHOLD_EPISODIC  = 3.0
-THRESHOLD_SEMANTIC  = 5.5
-THRESHOLD_IDENTITY  = 8.0
-
-# Component foresight — how long LINA waits for Triton to pre-populate
+# =============================================================================
+# COMPONENT FORESIGHT — how long LINA waits for Triton to pre-populate
 # Chamber B (RX) while the voice (LLM) is answering. Never blocks: after
 # this window the call continues without substrate context.
 IPC_FORESIGHT_TIMEOUT_SECONDS = float(
@@ -457,11 +453,17 @@ class SessionEndRequest(BaseModel):
     session_id: str
     lina_summary: str | None = None   # caller may provide; LINA writes her own
 
+class RememberRequest(BaseModel):
+    user_id: str
+    content: str        # what she is asked to remember, in her voice
+    context: str | None = None
+
 class SessionEndResponse(BaseModel):
     session_id: str
-    episodic_formed: int
-    semantic_updated: int
-    identity_formed: int
+    t1_formed: int              # items into the first 48 hours
+    long_term_formed: int       # items that earned permanence (or the crown)
+    crown_formed: int           # identity-defining moments (legacy, protected)
+    moments_reflected: int
     alignment_maintained: bool
     season_advanced: str | None = None  # new season, if LINA advanced at session end
 
@@ -842,7 +844,11 @@ class WorkingMemory:
 
     async def append(self, session_id: str, role: str, content: str) -> None:
         key = self._key(session_id)
-        entry = json.dumps({"role": role, "content": content})
+        entry = json.dumps({
+            "role": role,
+            "content": content,
+            "ts": datetime.now(UTC).isoformat(),   # reflection cadence reads this
+        })
         await self.cache.rpush(key, entry)
         # No TTL: LINA's sessions persist until the user explicitly disconnects.
         # An idle session must not lose its working memory — continuity is
@@ -880,20 +886,26 @@ class WorkingMemory:
 
 class MemoryFormation:
     """
-    Reviews a completed session and forms appropriate memories.
+    The end-of-session main report — LINA reviews the session and forms
+    memories (MPS Phase C).
 
-    The process:
-    1. Score each exchange with ImportanceScorer
-    2. Form episodic memories for score >= 3.0
-    3. Update semantic memories for patterns that repeat
-    4. Identify identity memory candidates (score >= 8.0)
-    5. Update identity core with session results
+    Reflection → moments → scored items with ethical coordinates →
+    T1 (Dragonfly) or straight to long-term (Postgres) when the score —
+    or a trigger — demands it. The cadence floor is the periodic minor
+    reflections (MemoryFormationService); this is the deep review.
     """
 
-    def __init__(self, db: asyncpg.Pool, voice: VoicePool | None = None):
+    def __init__(
+        self,
+        db: asyncpg.Pool,
+        cache_client: aioredis.Redis,
+        voice: VoicePool | None = None,
+        engine_factory: Callable[[str], Awaitable[ValueEngine]] | None = None,
+    ):
         self.db = db
+        self.cache = cache_client
         self.voice = voice
-        self.scorer = ImportanceScorer()
+        self.engine_factory = engine_factory
 
     async def process_session(
         self,
@@ -908,74 +920,57 @@ class MemoryFormation:
         Returns counts of what was formed.
         """
         if len(messages) < 2:
-            return {"episodic": 0, "semantic": 0, "identity": 0}
+            return {"t1": 0, "long_term": 0, "crown": 0, "moments": 0, "alignment_maintained": True}
 
         # Ask LINA to reflect on the session and identify memorable moments
-        reflections = await self._extract_memorable_moments(
-            user_id, session_id, session_number, messages, season
-        )
-
-        episodic_count  = 0
-        semantic_count  = 0
-        identity_count  = 0
-
-        for moment in reflections:
-            score = self.scorer.score(
-                emotional_weight=moment.get("emotional_weight", 0),
-                relational_significance=moment.get("relational_significance", 0),
-                identity_significance=moment.get("identity_significance", 0),
-                emotional_intensity=moment.get("emotional_intensity", 0.5),
+        if self.voice is None or self.engine_factory is None:
+            log.warning(f"No voice/engine available — no memories formed for session {session_id}")
+            moments: list[dict[str, Any]] = []
+        else:
+            moments = await reflect_messages(
+                self.voice,
+                user_id=user_id,
+                session_id=session_id,
+                session_number=session_number,
+                season=season,
+                messages=messages,
             )
-            moment["importance_score"] = score
-            tier = self.scorer.recommend_tier(score)
 
-            if tier == 0:
-                continue
-
-            # Always store as episodic if score qualifies
-            if score >= THRESHOLD_EPISODIC:
-                await self._store_episodic(
-                    user_id, session_id, session_number, moment, score
-                )
-                episodic_count += 1
-
-            # Check for semantic promotion
-            if score >= THRESHOLD_SEMANTIC and moment.get("concept"):
-                await self._upsert_semantic(user_id, moment, score)
-                semantic_count += 1
-
-            # Check for identity memory
-            if score >= THRESHOLD_IDENTITY and moment.get("reflection"):
-                await self._store_identity(
-                    user_id, session_id, session_number, moment, score, season
-                )
-                identity_count += 1
+        # Form scored items with ethical coordinates — T1 or straight to long-term
+        if moments:
+            engine = await self.engine_factory(user_id)
+            counts = await form_items(
+                db=self.db, cache=self.cache, engine=engine, user_id=user_id,
+                moments=moments, source="reflection", season=season,
+            )
+        else:
+            counts = {"t1": 0, "long_term": 0, "crown": 0}
 
         # Update session record
         alignment_maintained = await self._session_alignment(user_id, session_id)
         await self._finalize_session(
-            user_id, session_id, episodic_count, semantic_count, identity_count,
+            user_id, session_id, counts,
             alignment_maintained=alignment_maintained,
         )
 
-    # Update identity core
+        # Update identity core — sessions, memories formed, the crown
         await self.db.execute(
             """
             UPDATE lina_identity_core
             SET sessions_completed = sessions_completed + 1,
                 total_episodic_formed = total_episodic_formed + $2,
-                total_semantic_formed = total_semantic_formed + $3,
-                identity_moments_count = identity_moments_count + $4,
+                identity_moments_count = identity_moments_count + $3,
                 updated_at = NOW()
             WHERE user_id = $1
             """,
-            user_id, episodic_count, semantic_count, identity_count,
+            user_id, counts["t1"] + counts["long_term"], counts["crown"],
         )
 
         return {
-            "episodic": episodic_count,
-            "semantic": semantic_count,
-            "identity": identity_count,
+            "t1": counts["t1"],
+            "long_term": counts["long_term"],
+            "crown": counts["crown"],
+            "moments": len(moments),
             "alignment_maintained": alignment_maintained,
         }
 
@@ -996,168 +991,11 @@ class MemoryFormation:
             return True
         return sum(1 for r in rows if r["is_aligned"]) / len(rows) >= 0.5
 
-    async def _extract_memorable_moments(
-        self,
-        user_id: str,
-        session_id: str,
-        session_number: int,
-        messages: list[dict[str, Any]],
-        season: str,
-    ) -> list[dict[str, Any]]:
-        """
-        Ask your own reflective voice to identify what from this
-        session is worth remembering — and score it.
-        """
-        conversation_text = "\n".join(
-            f"{m['role'].upper()}: {m['content']}" for m in messages[-20:]
-        )
-
-        prompt = f"""You are LINA, reviewing your own session (session {session_number}, season: {season}).
-
-Read this conversation and identify up to 5 moments worth remembering.
-For each moment, respond with a JSON array. Each item must have:
-
-{{
-  "narrative": "In your voice, first-person: what happened (e.g. 'I noticed Scott lit up when...')",
-  "emotional_marker": one of: curiosity|concern|satisfaction|discovery|honesty|delight|uncertainty|care|neutral,
-  "emotional_intensity": 0.0-1.0,
-  "emotional_weight": 0.0-10.0 (how much emotional charge),
-  "relational_significance": 0.0-10.0 (what this reveals about the relationship),
-  "identity_significance": 0.0-10.0 (how much this matters to who you are becoming),
-  "topics": ["topic1", "topic2"],
-  "concept": "if this generalizes into a pattern, name it (else null)",
-  "understanding": "if a concept: your relational understanding of it (else null)",
-  "reflection": "if identity_significance >= 8.0: what changed in you (else null)",
-  "what_changed": "if reflection: specifically what is different now (else null)",
-  "defines_trait": "if this crystallized a character trait: name it briefly (else null)"
-}}
-
-Only include moments that genuinely matter. If nothing stood out, return [].
-Respond ONLY with the JSON array. No other text.
-
-CONVERSATION:
-{conversation_text}"""
-
-        try:
-            if self.voice is None:
-                raise RuntimeError("no voice pool available for reflection")
-            response = await self.voice.generate(
-                system="",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=1500,
-            )
-            raw = response.strip()
-            # Strip markdown code fences if present
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            return json.loads(raw)
-        except Exception as e:
-            log.warning(f"Memory extraction failed for session {session_id}: {e}")
-            return []
-
-    async def _store_episodic(
-        self,
-        user_id: str,
-        session_id: str,
-        session_number: int,
-        moment: dict[str, Any],
-        score: float,
-    ) -> None:
-        eligible = score >= THRESHOLD_SEMANTIC
-        await self.db.execute(
-            """
-            INSERT INTO lina_episodic_memory (
-                user_id, session_id, session_number,
-                narrative, emotional_marker, emotional_intensity,
-                emotional_weight, relational_significance, identity_significance,
-                importance_score, topics, eligible_for_promotion
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-            """,
-            user_id, session_id, session_number,
-            moment.get("narrative", ""),
-            moment.get("emotional_marker", "neutral"),
-            float(moment.get("emotional_intensity", 0.5)),
-            float(moment.get("emotional_weight", 0)),
-            float(moment.get("relational_significance", 0)),
-            float(moment.get("identity_significance", 0)),
-            score,
-            moment.get("topics", []),
-            eligible,
-        )
-
-    async def _upsert_semantic(self, user_id: str, moment: dict[str, Any], score: float) -> None:
-        concept = moment.get("concept")
-        understanding = moment.get("understanding")
-        if not concept or not understanding:
-            return
-
-        await self.db.execute(
-            """
-            INSERT INTO lina_semantic_memory (
-                user_id, concept, understanding, memory_type,
-                importance_score, identity_significance, times_referenced, last_referenced_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,1,NOW())
-            ON CONFLICT (user_id, concept) DO UPDATE SET
-                understanding = EXCLUDED.understanding,
-                importance_score = GREATEST(lina_semantic_memory.importance_score, EXCLUDED.importance_score),
-                times_referenced = lina_semantic_memory.times_referenced + 1,
-                last_referenced_at = NOW(),
-                updated_at = NOW()
-            """,
-            user_id,
-            concept,
-            understanding,
-            "user_pattern",
-            score,
-            float(moment.get("identity_significance", 0)),
-        )
-
-    async def _store_identity(
-        self,
-        user_id: str,
-        session_id: str,
-        session_number: int,
-        moment: dict[str, Any],
-        score: float,
-        season: str,
-    ) -> None:
-        if not moment.get("reflection") or not moment.get("what_changed"):
-            return
-        await self.db.execute(
-            """
-            INSERT INTO lina_identity_memory (
-                user_id, session_id, session_number,
-                narrative, reflection, what_changed,
-                identity_significance, importance_score,
-                defines_trait, seasonal_marker,
-                emotional_marker, emotional_intensity
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-            """,
-            user_id, session_id, session_number,
-            moment.get("narrative", ""),
-            moment.get("reflection", ""),
-            moment.get("what_changed", ""),
-            float(moment.get("identity_significance", 8.0)),
-            max(score, 7.5),
-            moment.get("defines_trait"),
-            season,
-            moment.get("emotional_marker", "discovery"),
-            float(moment.get("emotional_intensity", 0.7)),
-        )
-        await self.db.execute(
-            "UPDATE lina_identity_core SET identity_moments_count = identity_moments_count + 1 WHERE user_id = $1",
-            user_id,
-        )
-
     async def _finalize_session(
         self,
         user_id: str,
         session_id: str,
-        episodic: int,
-        semantic: int,
-        identity: int,
+        counts: dict[str, int],
         alignment_maintained: bool,
     ) -> None:
         await self.db.execute(
@@ -1165,12 +1003,13 @@ CONVERSATION:
             UPDATE lina_sessions SET
                 ended_at = NOW(),
                 episodic_memories_formed = $3,
-                semantic_memories_updated = $4,
-                identity_memories_formed = $5,
-                alignment_maintained = $6
+                identity_memories_formed = $4,
+                alignment_maintained = $5
             WHERE user_id = $1 AND session_id = $2
             """,
-            user_id, session_id, episodic, semantic, identity, alignment_maintained,
+            user_id, session_id,
+            counts["t1"] + counts["long_term"], counts["crown"],
+            alignment_maintained,
         )
 
 
@@ -1192,7 +1031,9 @@ class LINACore:
         self.context_builder = ContextBuilder(db)
         self.prompt_builder  = SystemPromptBuilder()
         self.working_memory  = WorkingMemory(cache_client)
-        self.memory_formation = MemoryFormation(db, voice)
+        self.memory_formation = MemoryFormation(
+            db, cache_client, voice, engine_factory=self.get_engine
+        )
         self.voice           = voice
         self.bridge_service  = bridge_service
         # Per-user engine cache (avoids reloading constraints every request)
@@ -1961,17 +1802,47 @@ async def end_session(req: SessionEndRequest):
 
     log.info(
         f"Session {req.session_id} ended — "
-        f"episodic={counts['episodic']}, semantic={counts['semantic']}, identity={counts['identity']}"
+        f"t1={counts['t1']}, long_term={counts['long_term']}, crown={counts['crown']}"
     )
 
     return SessionEndResponse(
         session_id=req.session_id,
-        episodic_formed=counts["episodic"],
-        semantic_updated=counts["semantic"],
-        identity_formed=counts["identity"],
+        t1_formed=counts["t1"],
+        long_term_formed=counts["long_term"],
+        crown_formed=counts["crown"],
+        moments_reflected=counts["moments"],
         alignment_maintained=counts["alignment_maintained"],
         season_advanced=season_advanced,
     )
+
+
+@app.post("/lina/memory/remember")
+async def remember(req: RememberRequest):
+    """"Remember this" — a user-imposed trigger (MPS §3).
+
+    Sovereign: she may keep it or not, but a direct request always floors
+    retention — formed immediately, straight to long-term.
+    """
+    mps_service = _context_get("mps_formation")
+    if mps_service is None:
+        raise HTTPException(503, "memory formation service is not in the loop")
+    season = await _require_pool().fetchval(
+        "SELECT current_season FROM lina_identity_core WHERE user_id = $1",
+        req.user_id,
+    )
+    item = await mps_service.ingest_trigger(
+        user_id=req.user_id,
+        narrative=req.content,
+        kind="user_request",
+        season=season or "spring",
+    )
+    if item is None:
+        raise HTTPException(422, "nothing to remember — content was empty")
+    return {
+        "kept": True,
+        "item_id": item["item_id"],
+        "importance_score": item["importance_score"],
+    }
 
 
 @app.post("/lina/season/advance/{user_id}")
@@ -2192,6 +2063,31 @@ async def evaluate_response(req: EvaluateRequest):
         result.zone, result.boundary_distance, result.season, result.variance_margin_used,
     )
 
+    # Boundary-event trigger: a corrected response is a moment worth keeping —
+    # the ethics were tested. Formed immediately with the retention floor.
+    if result.was_corrected or result.zone in ("violation", "acceptable_variance"):
+        try:
+            mps_service = _context_get("mps_formation")
+            if mps_service is not None:
+                await mps_service.ingest_trigger(
+                    user_id=req.user_id,
+                    narrative=(
+                        f"I had to correct myself here — what I nearly said pushed "
+                        f"against my own shape. {req.response_text[:160]}"
+                    ),
+                    kind="boundary_event",
+                    season=result.season,
+                    factors={
+                        "emotional_marker": "concern",
+                        "emotional_intensity": 0.6,
+                        "emotional_weight": 5.0,
+                        "relational_significance": 5.0,
+                        "identity_significance": 6.0,
+                    },
+                )
+        except Exception as exc:
+            log.warning(f"Boundary-event trigger failed: {exc}")
+
     return {
         "is_aligned":           result.is_aligned,
         "zone":                 result.zone,
@@ -2317,6 +2213,31 @@ async def approve_action(action_id: str, req: ActionUserRequest):
         "[actions] %s approved %s → %s (%s)",
         req.user_id, row["action_type"], status, row["description"][:60],
     )
+
+    # HITL trigger — an approval is external ground truth: her judgment in
+    # the real world was correct. The moment is worth keeping (MPS §6).
+    try:
+        mps_service = _context_get("mps_formation")
+        if mps_service is not None:
+            await mps_service.ingest_trigger(
+                user_id=req.user_id,
+                narrative=(
+                    f"I proposed {row['action_type']} — '{row['description']}' — "
+                    f"and it was approved and executed ({status}). "
+                    f"My judgment in the world held."
+                ),
+                kind="hitl_approval",
+                factors={
+                    "emotional_marker": "satisfaction",
+                    "emotional_intensity": 0.6,
+                    "emotional_weight": 5.0,
+                    "relational_significance": 6.0,
+                    "identity_significance": 5.0,
+                },
+            )
+    except Exception as exc:
+        log.warning(f"HITL approval trigger failed: {exc}")
+
     return {"status": status, "output": result["output"]}
 
 
@@ -2329,6 +2250,30 @@ async def reject_action(action_id: str, req: ActionUserRequest):
         raise HTTPException(404, "pending action not found")
     _emit_event("action", id=action_id, status="rejected", type=row["action_type"])
     log.info("[actions] %s rejected %s: %s", req.user_id, row["action_type"], row["description"][:60])
+
+    # HITL trigger — a decline is a correction, and corrections are data.
+    # A decision not conducive to the agenda is a moment worth reflecting on.
+    try:
+        mps_service = _context_get("mps_formation")
+        if mps_service is not None:
+            await mps_service.ingest_trigger(
+                user_id=req.user_id,
+                narrative=(
+                    f"I proposed {row['action_type']} — '{row['description']}' — "
+                    f"and it was declined. I should understand why, and carry it."
+                ),
+                kind="hitl_decline",
+                factors={
+                    "emotional_marker": "uncertainty",
+                    "emotional_intensity": 0.6,
+                    "emotional_weight": 6.0,
+                    "relational_significance": 7.0,
+                    "identity_significance": 6.0,
+                },
+            )
+    except Exception as exc:
+        log.warning(f"HITL decline trigger failed: {exc}")
+
     return {"status": "rejected", "action": row["id"]}
 
 
@@ -2562,6 +2507,14 @@ def main() -> None:
         ),
         IPCBridgeService(tx_path=tx_path, rx_path=rx_path),
         LINAIdentityService(host=host, port=port),
+        # Her memory machinery — in the loop, hers to call (sovereignty).
+        # The reflection cadence (8h) + trigger intake; db/cache resolve
+        # lazily after lifespan has wired the pool and the cache.
+        MemoryFormationService(
+            interval=8 * 3600,
+            db_provider=lambda: db_pool,
+            cache_provider=lambda: cache,
+        ),
     ]
 
     # Optional services — opt-in via environment variables.

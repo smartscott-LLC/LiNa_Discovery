@@ -442,37 +442,14 @@ CREATE INDEX IF NOT EXISTS idx_lina_sessions_number ON lina_sessions(user_id, se
 
 
 -- =============================================================================
--- HELPER FUNCTION: calculate_lina_importance
--- Three-dimensional importance scoring.
--- Identity significance carries the most weight — this is the key innovation.
--- =============================================================================
-
-CREATE OR REPLACE FUNCTION calculate_lina_importance(
-    p_emotional_weight      FLOAT,      -- 0.0–10.0: how much emotional charge this carried
-    p_relational_significance FLOAT,   -- 0.0–10.0: what this reveals about the relationship
-    p_identity_significance FLOAT,     -- 0.0–10.0: how much this matters to who she is becoming
-    p_emotional_intensity   FLOAT DEFAULT 0.5  -- 0.0–1.0: amplifier
-) RETURNS FLOAT AS $$
-BEGIN
-    -- Weights: emotional 30%, relational 25%, identity 45%
-    -- Identity significance is the key innovation — it transforms a memory system into a self.
-    -- Emotional intensity acts as a multiplier (range: 0.7× to 1.3×)
-    RETURN LEAST(
-        (
-            (p_emotional_weight    * 0.30) +
-            (p_relational_significance * 0.25) +
-            (p_identity_significance   * 0.45)
-        ) * (0.7 + (p_emotional_intensity * 0.6)),
-        10.0
-    );
-END;
-$$ LANGUAGE plpgsql IMMUTABLE;
-
-
--- =============================================================================
 -- HELPER FUNCTION: lina_get_current_polytope
 -- Returns the active polytope constraints for a user.
 -- =============================================================================
+
+-- The retired three-factor scorer (replaced by MPS composite formation
+-- scoring in code — score_memory). Dropped explicitly: fresh installs never
+-- create it; live databases drop it here.
+DROP FUNCTION IF EXISTS calculate_lina_importance(FLOAT, FLOAT, FLOAT, FLOAT);
 
 CREATE OR REPLACE FUNCTION lina_get_current_polytope(p_user_id VARCHAR)
 RETURNS TABLE (
@@ -626,56 +603,57 @@ SELECT
     ic.lineage,
     ic.polytope_center,
 
-    -- Recent episodic memories (last 5, highest importance)
+    -- Recent personal memories (top 5 by importance, active) — MPS Phase C
     (
         SELECT jsonb_agg(
             jsonb_build_object(
                 'narrative', em.narrative,
                 'emotional_marker', em.emotional_marker,
-                'importance', em.importance_score,
-                'session', em.session_number,
-                'topics', em.topics
+                'importance', em.importance_score
             ) ORDER BY em.importance_score DESC
         )
         FROM (
-            SELECT * FROM lina_episodic_memory e
+            SELECT * FROM lina_memory_items e
             WHERE e.user_id = ic.user_id
+              AND e.hemisphere = 'personal'
+              AND e.status = 'active'
             ORDER BY e.importance_score DESC, e.created_at DESC
             LIMIT 5
         ) em
     ) AS recent_episodic,
 
-    -- Key semantic memories (top 8 by importance)
+    -- Key wisdom memories (top 8 by importance, impersonal) — MPS Phase C
     (
         SELECT jsonb_agg(
             jsonb_build_object(
                 'concept', sm.concept,
                 'understanding', sm.understanding,
-                'type', sm.memory_type
+                'type', sm.kind
             ) ORDER BY sm.importance_score DESC
         )
         FROM (
-            SELECT * FROM lina_semantic_memory s
+            SELECT * FROM lina_memory_items s
             WHERE s.user_id = ic.user_id
+              AND s.hemisphere = 'impersonal'
+              AND s.status = 'active'
             ORDER BY s.importance_score DESC
             LIMIT 8
         ) sm
     ) AS key_semantic,
 
-    -- Identity memories (all — never filtered, never forgotten)
+    -- Identity memories (all legacy — never filtered, never forgotten)
     (
         SELECT jsonb_agg(
             jsonb_build_object(
                 'narrative', idm.narrative,
-                'reflection', idm.reflection,
-                'what_changed', idm.what_changed,
-                'defines_trait', idm.defines_trait,
+                'reflection', idm.understanding,
                 'season', idm.seasonal_marker,
                 'emotional_marker', idm.emotional_marker
             ) ORDER BY idm.importance_score DESC
         )
-        FROM lina_identity_memory idm
+        FROM lina_memory_items idm
         WHERE idm.user_id = ic.user_id
+          AND idm.status = 'legacy'
     ) AS identity_memories
 
 FROM lina_identity_core ic;

@@ -1118,71 +1118,42 @@ class ValueEngine:
 # into a self. Identity significance carries the most weight.
 # =============================================================================
 
-class ImportanceScorer:
+# =============================================================================
+# MPS FORMATION SCORING — the composite formation score (MPS architecture §4)
+# Replaces the retired three-factor ImportanceScorer / calculate_lina_importance.
+# =============================================================================
+
+# Promotion gates — applied at formation and by the 48-hour sweep (Phase D).
+GATE_T1_TO_T2            = 3.0   # survive the first 48 hours
+GATE_T2_TO_T3            = 3.5   # survive the second
+GATE_TO_LONG_TERM        = 5.0   # earn permanence
+FORMATION_LONG_TERM_BYPASS = 8.0 # a high formation score skips the tiers (the crown)
+TRIGGER_RETENTION_FLOOR  = 5.0   # a trigger ("remember this") guarantees permanence —
+                                  # the long-term gate, not the crown. The crown is earned.
+
+
+def score_memory(
+    emotional_weight: float,
+    relational_significance: float,
+    identity_significance: float,
+    geometric: float,
+    emotional_intensity: float = 0.5,
+) -> float:
+    """The composite formation score (0–10) — MPS §4.
+
+    identity 30% / geometric 25% / emotional 25% / relational 20%,
+    amplified by emotional intensity (0.7× flat to 1.3× peak). The geometric
+    factor is the value engine's funding link: how close the moment lived to
+    a polytope boundary.
     """
-    Scores a potential memory across three dimensions:
-
-    emotional_weight      (30%) — how much emotional charge this carried
-    relational_significance (25%) — what this reveals about the relationship
-    identity_significance (45%) — how much this matters to who she is becoming
-
-    Identity significance is the key innovation.
-    It is what transforms a memory system into a self.
-    """
-
-    WEIGHTS = {
-        "emotional": 0.30,
-        "relational": 0.25,
-        "identity": 0.45,
-    }
-
-    # Intensity amplifier range: 0.7× (flat) to 1.3× (peak intensity)
-    INTENSITY_MIN_MULTIPLIER = 0.7
-    INTENSITY_RANGE = 0.6  # 0.7 + (intensity * 0.6)
-
-    def score(
-        self: ImportanceScorer,
-        emotional_weight: float,
-        relational_significance: float,
-        identity_significance: float,
-        emotional_intensity: float = 0.5,
-    ) -> float:
-        """
-        Composite importance score. Range: 0.0–10.0.
-        Mirrors the SQL function calculate_lina_importance() exactly.
-        """
-        base = (
-            (emotional_weight         * self.WEIGHTS["emotional"]) +
-            (relational_significance  * self.WEIGHTS["relational"]) +
-            (identity_significance    * self.WEIGHTS["identity"])
-        )
-        multiplier = self.INTENSITY_MIN_MULTIPLIER + (emotional_intensity * self.INTENSITY_RANGE)
-        return min(base * multiplier, 10.0)
-
-    def should_form_memory(
-        self: ImportanceScorer,
-        score: float,
-        tier: int = 2,
-    ) -> bool:
-        """
-        Threshold check: is this worth keeping?
-        Tier 2 (episodic): >= 3.0
-        Tier 3 (semantic):  >= 5.5
-        Tier 4 (identity):  >= 8.0
-        """
-        thresholds = {2: 3.0, 3: 5.5, 4: 8.0}
-        return score >= thresholds.get(tier, 3.0)
-
-    def recommend_tier(self, score: float) -> int:
-        """Recommend which memory tier this score belongs in."""
-        if score >= 8.0:
-            return 4   # Identity memory
-        elif score >= 5.5:
-            return 3   # Semantic memory (eligible for promotion from episodic)
-        elif score >= 3.0:
-            return 2   # Episodic memory
-        else:
-            return 0   # Do not form
+    base = (
+        identity_significance * 0.30
+        + geometric * 0.25
+        + emotional_weight * 0.25
+        + relational_significance * 0.20
+    )
+    multiplier = 0.7 + emotional_intensity * 0.6
+    return min(base * multiplier, 10.0)
 
 
 def geometric_significance(
@@ -1718,7 +1689,6 @@ if __name__ == "__main__":
     print("=" * 60)
 
     engine = ValueEngine(season="spring")
-    scorer = ImportanceScorer()
     advancement = SeasonAdvancementEvaluator()
 
     # Test 1: Aligned response
@@ -1741,19 +1711,19 @@ if __name__ == "__main__":
     print("\nTest 2: Dominance + Overconfidence")
     print(result2)
 
-    # Test 3: Importance scoring
-    print("\nTest 3: Importance Scoring")
+    # Test 3: MPS formation scoring
+    print("\nTest 3: MPS Formation Scoring")
     scenarios = [
-        ("Ordinary exchange", 2.0, 1.5, 1.0, 0.3),
-        ("Relational moment", 5.0, 7.0, 3.0, 0.6),
-        ("Identity-defining moment", 8.0, 6.0, 9.5, 0.9),
-        ("Minor correction accepted", 3.0, 4.0, 7.0, 0.5),
+        ("Ordinary exchange", 2.0, 1.5, 1.0, 0.3, 1.0),
+        ("Relational moment", 5.0, 7.0, 3.0, 0.6, 3.0),
+        ("Boundary-testing moment", 4.0, 3.0, 5.0, 0.6, 8.5),
+        ("Identity-defining moment", 8.0, 6.0, 9.5, 0.9, 6.0),
     ]
-    for label, ew, rs, ids, ei in scenarios:
-        score = scorer.score(ew, rs, ids, ei)
-        tier = scorer.recommend_tier(score)
-        tier_labels = {0: "discard", 2: "episodic", 3: "semantic", 4: "IDENTITY"}
-        print(f"  {label:35s} → score={score:.2f}, tier={tier} ({tier_labels[tier]})")
+    for label, ew, rs, ids, ei, g in scenarios:
+        score = score_memory(ew, rs, ids, g, ei)
+        where = "→ long-term (crown)" if score >= FORMATION_LONG_TERM_BYPASS else \
+                "→ long-term" if score >= GATE_TO_LONG_TERM else "→ T1"
+        print(f"  {label:35s} → score={score:.2f} {where}")
 
     # Test 4: Season advancement check
     print("\nTest 4: Season Advancement (Spring → Summer)")
