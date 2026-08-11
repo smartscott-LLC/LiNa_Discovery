@@ -8,6 +8,15 @@ forward with failing tests.
 Reference: `docs/MPS_ARCHITECTURE.md` (the settled baseline). The MPS blueprint
 document supersedes the baseline where they differ.
 
+## Status
+- ✅ **Phase A — Value mechanics** (MemoryDial, geometric significance, composite
+  formation score, gates)
+- ✅ **Phase B — Storage substrate** (pgvector image, unified memory store, wisdom
+  layer, promotion log, migration)
+- ✅ **Phase C — Formation** (reflection cadence, triggers, sovereignty; verified
+  end-to-end with a live conversation)
+- 🚧 **Phase D — Consolidation** (48h sweep + fallout) — *in progress*
+
 ## Phase A — Value mechanics (pure logic, additive, zero live-system risk)
 - `MemoryDial` — the add/subtract mechanism: bounded Δ (−3 … +3), absolute floor
   enforcement, must-keep behavior (floor = score, immovable).

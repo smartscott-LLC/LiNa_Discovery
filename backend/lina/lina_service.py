@@ -97,7 +97,7 @@ import re
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Awaitable, Callable
 
 import asyncpg
@@ -119,7 +119,12 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from mps import MemoryFormationService, form_items, reflect_messages
+from mps import (
+    MemoryConsolidationService,
+    MemoryFormationService,
+    form_items,
+    reflect_messages,
+)
 from pydantic import BaseModel
 
 import metrics
@@ -1874,6 +1879,33 @@ async def advance_season(user_id: str):
     return await core.advance_season_if_ready(user_id)
 
 
+def _seconds_to_next_midnight() -> float:
+    """Seconds until the next 00:00 UTC — the sweep's alignment point.
+    The 48-hour clock starts at midnight and stays aligned with it."""
+    now = datetime.now(UTC)
+    nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return (nxt - now).total_seconds()
+
+
+async def run_sweep_now():
+    """Run the 48-hour consolidation sweep on demand (ops/observation).
+
+    The cadence remains the authority; this endpoint exists so the sweep
+    can be watched, tested, and invoked without waiting for midnight.
+    """
+    svc = _context_get("mps_consolidation")
+    if svc is None:
+        raise HTTPException(503, "consolidation service is not in the loop")
+    counts = await svc.run_sweep()
+    log.info(f"[mps] sweep invoked on demand — {counts}")
+    return counts
+
+
+@app.post("/lina/memory/sweep")
+async def sweep_endpoint():
+    return await run_sweep_now()
+
+
 @app.post("/lina/feedback/flag")
 async def flag_miscalibration(req: FlagRequest):
     """
@@ -2522,6 +2554,14 @@ def main() -> None:
         # lazily after lifespan has wired the pool and the cache.
         MemoryFormationService(
             interval=8 * 3600,
+            db_provider=lambda: db_pool,
+            cache_provider=lambda: cache,
+        ),
+        # The 48-hour sweep — the tier clock's authority. Aligned to midnight
+        # (00:00 every other day) so the global cadence never drifts.
+        MemoryConsolidationService(
+            interval=48 * 3600,
+            delay=_seconds_to_next_midnight(),
             db_provider=lambda: db_pool,
             cache_provider=lambda: cache,
         ),

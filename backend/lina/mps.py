@@ -25,6 +25,8 @@ from aiomisc.service.periodic import PeriodicService
 
 from value_engine import (
     FORMATION_LONG_TERM_BYPASS,
+    GATE_T1_TO_T2,
+    GATE_T2_TO_T3,
     GATE_TO_LONG_TERM,
     TRIGGER_RETENTION_FLOOR,
     create_value_engine_for_user,
@@ -35,9 +37,9 @@ from value_engine import (
 log = logging.getLogger("lina.mps")
 
 
-def _t1_key(item_id: str) -> str:
-    """T1 lives in Dragonfly, bucketed by tier, time-based (MPS §4)."""
-    return f"lina:mps:t1:{item_id}"
+def _tier_key(tier: str, item_id: str) -> str:
+    """Short-term tiers live in Dragonfly, bucketed by tier (MPS §4)."""
+    return f"lina:mps:{tier}:{item_id}"
 
 
 # =============================================================================
@@ -134,10 +136,13 @@ def route_item(item: dict[str, Any]) -> dict[str, Any]:
 async def store_t1(cache: Any, item: dict[str, Any]) -> None:
     """T1 — the first 48 hours, time-based in Dragonfly. The 48-hour sweep
     (Phase D) is the lifecycle authority: promote, fall out, or purge."""
-    await cache.set(_t1_key(item["item_id"]), json.dumps(item))
+    await cache.set(_tier_key("t1", item["item_id"]), json.dumps(item))
 
 
-async def store_long_term(db: Any, item: dict[str, Any], route: dict[str, Any]) -> None:
+async def store_long_term(
+    db: Any, item: dict[str, Any], route: dict[str, Any], *,
+    from_stage: str = "formation", log_reason: str | None = None,
+) -> None:
     """Long-term — active or the crown (legacy, protected)."""
     await db.execute(
         """
@@ -158,15 +163,14 @@ async def store_long_term(db: Any, item: dict[str, Any], route: dict[str, Any]) 
         item["emotional_marker"], item["emotional_intensity"],
         item["formation_source"], item.get("seasonal_marker"),
     )
-    await db.execute(
-        """
-        INSERT INTO lina_promotion_log (user_id, item_id, from_stage, to_stage, importance_score, reason)
-        VALUES ($1,$2,'formation',$3,$4,$5)
-        """,
-        item["user_id"], item["item_id"], route["status"],
-        item["importance_score"],
+    reason = log_reason or (
         f"Formation — score {item['importance_score']} "
-        + ("(triggered)" if item["trigger"] else "(the crown)" if route["protected"] else "(earned permanence)"),
+        + ("(triggered)" if item.get("trigger") else "(the crown)" if route["protected"] else "(earned permanence)")
+    )
+    await _log_promotion(
+        db, user_id=item["user_id"], item_id=item["item_id"],
+        from_stage=from_stage, to_stage=route["status"],
+        score=item["importance_score"], reason=reason,
     )
 
 
@@ -432,3 +436,193 @@ class MemoryFormationService(PeriodicService):
             f"[mps] trigger '{kind}' → {route['status']} (score {item['importance_score']})"
         )
         return item
+
+
+# =============================================================================
+# THE SWEEP — the 48-hour tier clock (MPS §2, Phase D)
+# =============================================================================
+
+TIER_GATES = {
+    "t1": GATE_T1_TO_T2,     # survive the first 48 hours
+    "t2": GATE_T2_TO_T3,     # survive the second
+    "t3": GATE_TO_LONG_TERM, # earn permanence
+}
+TIER_NEXT = {"t1": "t2", "t2": "t3"}
+
+
+async def _log_promotion(
+    db: Any, *, user_id: str, item_id: str,
+    from_stage: str, to_stage: str, score: float, reason: str,
+) -> None:
+    """Every promotion is recorded — growth leaves its mark (MPS §2).
+    Purge leaves nothing; this is never called for a purge."""
+    await db.execute(
+        """
+        INSERT INTO lina_promotion_log (user_id, item_id, from_stage, to_stage, importance_score, reason)
+        VALUES ($1,$2,$3,$4,$5,$6)
+        """,
+        user_id, item_id, from_stage, to_stage, score, reason,
+    )
+
+
+class MemoryConsolidationService(PeriodicService):
+    """The 48-hour sweep — the tier clock's authority (MPS §2, Phase D).
+
+    One pass every 48 hours (00:00, every other day) processes all three
+    tiers at once: T1→T2 (≥3.0), T2→T3 (≥3.5), T3→long-term (≥5.0). Every
+    failure goes to fallout — a 48-hour second chance, re-run at the next
+    sweep. Still failing after the fallout run → purged. Gone. No record.
+    Passing the fallout run → repurposed, back to T1.
+
+    The fallout is grace applied to forgetting: it catches both false purges
+    and accidental keeps.
+    """
+
+    def __init__(
+        self,
+        *,
+        interval: float = 48 * 3600,
+        delay: float = 0.0,
+        db_provider: Callable[[], Any] | None = None,
+        cache_provider: Callable[[], Any] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(interval=interval, delay=delay, **kwargs)
+        self.db_provider = db_provider
+        self.cache_provider = cache_provider
+
+    async def start(self) -> None:
+        # Published into the loop's Context — ops endpoints and observation
+        # can invoke the sweep on demand; the cadence remains the authority.
+        self.context["mps_consolidation"] = self
+        log.info(
+            f"[mps] consolidation service live — sweep every {self.interval / 3600:.0f}h"
+        )
+
+    def _db(self) -> Any:
+        db = self.db_provider() if self.db_provider else None
+        if db is None:
+            raise RuntimeError("database pool not initialized")
+        return db
+
+    def _cache(self) -> Any:
+        cache = self.cache_provider() if self.cache_provider else None
+        if cache is None:
+            raise RuntimeError("working-memory cache not initialized")
+        return cache
+
+    async def callback(self) -> None:
+        try:
+            counts = await self.run_sweep()
+            log.info(
+                "[mps] sweep complete — t1→t2=%d t2→t3=%d to_long_term=%d "
+                "fallout=%d repurposed=%d purged=%d",
+                counts["t1_to_t2"], counts["t2_to_t3"], counts["to_long_term"],
+                counts["fallout"], counts["repurposed"], counts["purged"],
+            )
+        except Exception as exc:
+            log.warning(f"[mps] sweep failed: {exc}")
+
+    async def _scan(self, cache: Any, tier: str) -> list[tuple[str, dict[str, Any]]]:
+        found: list[tuple[str, dict[str, Any]]] = []
+        prefix = f"lina:mps:{tier}:"
+        async for key in cache.scan_iter(match=f"{prefix}*"):
+            raw = await cache.get(key)
+            if not raw:
+                continue
+            try:
+                found.append((key, json.loads(raw)))
+            except Exception:
+                continue
+        return found
+
+    async def run_sweep(self) -> dict[str, int]:
+        """One global pass over all three tiers + the fallout reprieve.
+
+        The sweep judges the state as it was at the start: every tier is a
+        48-hour residence on the global clock, so an item advances at most
+        one tier per sweep — and a freshly failed item waits out its full
+        48-hour fallout reprieve before it is judged again.
+
+        Returns counts of every decision the sweep made.
+        """
+        db = self._db()
+        cache = self._cache()
+        counts = {
+            "t1_to_t2": 0, "t2_to_t3": 0, "to_long_term": 0,
+            "fallout": 0, "repurposed": 0, "purged": 0,
+        }
+
+        # Snapshot first: newly moved/failed items are not re-judged this pass.
+        tiers = {tier: await self._scan(cache, tier) for tier in TIER_GATES}
+        fallout = await self._scan(cache, "fallout")
+
+        # 1. The tiers — promote, or fall out (grace: one 48h second chance).
+        for tier, gate in TIER_GATES.items():
+            for key, item in tiers[tier]:
+                score = float(item.get("importance_score", 0.0))
+                item_id = item["item_id"]
+                if score >= gate:
+                    if tier == "t3":
+                        # Earned permanence — into long-term.
+                        route = {
+                            "kind": item.get("kind", "episodic"),
+                            "status": "active",
+                            "protected": False,
+                        }
+                        try:
+                            await store_long_term(
+                                db, item, route, from_stage="t3",
+                                log_reason=f"48h sweep — score {score} (earned permanence)",
+                            )
+                        except Exception as exc:
+                            # The user is gone — the memory is meaningless
+                            # without her. Purge. Gone. No record.
+                            log.warning(
+                                f"[mps] t3 promotion failed for {item_id} "
+                                f"({exc}) — purging orphan"
+                            )
+                            await cache.delete(key)
+                            counts["purged"] += 1
+                            continue
+                        await cache.delete(key)
+                        counts["to_long_term"] += 1
+                    else:
+                        nxt = TIER_NEXT[tier]
+                        await cache.set(_tier_key(nxt, item_id), json.dumps(item))
+                        await cache.delete(key)
+                        await _log_promotion(
+                            db, user_id=item["user_id"], item_id=item_id,
+                            from_stage=tier, to_stage=nxt, score=score,
+                            reason=f"Sweep — score {score} ≥ gate {gate}",
+                        )
+                        counts[f"{tier}_to_{nxt}"] += 1
+                else:
+                    item["failed_gate"] = gate
+                    item["entered_fallout_at"] = datetime.now(UTC).isoformat()
+                    await cache.set(_tier_key("fallout", item_id), json.dumps(item))
+                    await cache.delete(key)
+                    counts["fallout"] += 1
+
+        # 2. Fallout — the reprieve, judged at this sweep (snapshot: only
+        # items that were already waiting get their verdict).
+        for key, item in fallout:
+            gate = float(item.get("failed_gate", GATE_T1_TO_T2))
+            score = float(item.get("importance_score", 0.0))
+            item_id = item["item_id"]
+            if score >= gate:
+                # Repurposed — back into the stream from the bottom.
+                await cache.set(_tier_key("t1", item_id), json.dumps(item))
+                await cache.delete(key)
+                await _log_promotion(
+                    db, user_id=item["user_id"], item_id=item_id,
+                    from_stage="fallout", to_stage="t1", score=score,
+                    reason=f"Repurposed — score {score} ≥ gate {gate}",
+                )
+                counts["repurposed"] += 1
+            else:
+                # Purged. Gone. No record.
+                await cache.delete(key)
+                counts["purged"] += 1
+
+        return counts

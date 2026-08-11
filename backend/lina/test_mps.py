@@ -13,6 +13,7 @@ sys.path.insert(0, "/home/server/LiNa_Discovery/backend/lina")
 import pytest  # noqa: E402
 
 from mps import (  # noqa: E402
+    MemoryConsolidationService,
     MemoryFormationService,
     build_item,
     form_items,
@@ -60,6 +61,15 @@ class FakeCache:
 
     async def get(self, key: str) -> str | None:
         return self.store.get(key)
+
+    async def delete(self, key: str) -> None:
+        self.store.pop(key, None)
+
+    async def scan_iter(self, match: str | None = None, **kwargs: Any) -> Any:
+        prefix = match.split("*")[0] if match else ""
+        for key in list(self.store):
+            if key.startswith(prefix):
+                yield key
 
     async def lrange(self, key: str, start: int, end: int) -> list[str]:
         return []
@@ -279,3 +289,129 @@ class TestServiceTrigger:
         ))
         assert item is None
         assert db.executes == []
+
+
+class TestSweep:
+    """Phase D — the 48-hour tier clock: promote, fall out, repurpose, purge."""
+
+    def _svc(self, db: FakeDB, cache: FakeCache) -> MemoryConsolidationService:
+        return MemoryConsolidationService(
+            interval=3600,
+            db_provider=lambda: db,
+            cache_provider=lambda: cache,
+        )
+
+    def _item(self, item_id: str, score: float, **extra: Any) -> dict[str, Any]:
+        base = {
+            "item_id": item_id, "user_id": "u1", "hemisphere": "personal",
+            "kind": "episodic", "narrative": "n", "ethical_coordinates": [0.5] * 14,
+            "importance_score": score, "emotional_marker": "neutral",
+            "emotional_intensity": 0.5, "formation_source": "reflection",
+            "seasonal_marker": "spring", "concept": None, "understanding": None,
+            "trigger": False,
+        }
+        base.update(extra)
+        return base
+
+    async def _seed(self, cache: FakeCache, tier: str, item: dict[str, Any]) -> None:
+        await cache.set(f"lina:mps:{tier}:{item['item_id']}", json.dumps(item))
+
+    def test_promotes_across_tiers(self):
+        db = FakeDB()
+        cache = FakeCache()
+        asyncio.run(self._seed(cache, "t1", self._item("a", 4.0)))
+        asyncio.run(self._seed(cache, "t2", self._item("b", 3.6)))
+        counts = asyncio.run(self._svc(db, cache).run_sweep())
+        assert counts["t1_to_t2"] == 1 and counts["t2_to_t3"] == 1
+        assert "lina:mps:t2:a" in cache.store
+        assert "lina:mps:t3:b" in cache.store
+        assert "lina:mps:t1:a" not in cache.store
+        # Both promotions logged.
+        assert sum(1 for sql, _ in db.executes if "lina_promotion_log" in sql) == 2
+
+    def test_t3_earns_permanence(self):
+        db = FakeDB()
+        cache = FakeCache()
+        asyncio.run(self._seed(cache, "t3", self._item("c", 6.0)))
+        counts = asyncio.run(self._svc(db, cache).run_sweep())
+        assert counts["to_long_term"] == 1
+        assert "lina:mps:t3:c" not in cache.store
+        assert sum(1 for sql, _ in db.executes if "lina_memory_items" in sql) == 1
+        # Promotion logged with the true provenance: t3 → active.
+        promo = [args for sql, args in db.executes if "lina_promotion_log" in sql]
+        assert promo and promo[0][2] == "t3" and promo[0][3] == "active"
+
+    def test_failure_goes_to_fallout(self):
+        db = FakeDB()
+        cache = FakeCache()
+        asyncio.run(self._seed(cache, "t1", self._item("d", 2.0)))
+        counts = asyncio.run(self._svc(db, cache).run_sweep())
+        assert counts["fallout"] == 1
+        assert "lina:mps:fallout:d" in cache.store
+        item = json.loads(cache.store["lina:mps:fallout:d"])
+        assert item["failed_gate"] == 3.0
+
+    def test_fallout_repurpose_and_purge(self):
+        db = FakeDB()
+        cache = FakeCache()
+        # A borderline item whose score was raised (the dial touched it) → repurposed.
+        asyncio.run(self._seed(cache, "fallout", self._item("e", 3.2, failed_gate=3.0)))
+        # A genuinely low item → purged. Gone. No record.
+        asyncio.run(self._seed(cache, "fallout", self._item("f", 2.0, failed_gate=3.0)))
+        counts = asyncio.run(self._svc(db, cache).run_sweep())
+        assert counts["repurposed"] == 1 and counts["purged"] == 1
+        assert "lina:mps:t1:e" in cache.store
+        assert "lina:mps:fallout:e" not in cache.store
+        assert "lina:mps:fallout:f" not in cache.store
+        # Purge leaves no promotion record; the repurpose is logged.
+        promo = [sql for sql, _ in db.executes if "lina_promotion_log" in sql]
+        assert len(promo) == 1
+
+    def test_full_cycle_across_sweeps(self):
+        """The six-day journey, proven over simulated sweeps."""
+        db = FakeDB()
+        cache = FakeCache()
+        # t1 item that will never make the gate → fallout → purged.
+        asyncio.run(self._seed(cache, "t1", self._item("doomed", 2.0)))
+        # t1 item that clears the gate → climbs all the way to permanence.
+        asyncio.run(self._seed(cache, "t1", self._item("climber", 7.0)))
+
+        sweep1 = asyncio.run(self._svc(db, cache).run_sweep())
+        assert sweep1["t1_to_t2"] == 1 and sweep1["fallout"] == 1
+        assert "lina:mps:t2:climber" in cache.store
+        assert "lina:mps:fallout:doomed" in cache.store
+
+        sweep2 = asyncio.run(self._svc(db, cache).run_sweep())
+        assert sweep2["t2_to_t3"] == 1 and sweep2["purged"] == 1
+        assert "lina:mps:t3:climber" in cache.store
+        assert "lina:mps:fallout:doomed" not in cache.store  # gone. no record.
+
+        sweep3 = asyncio.run(self._svc(db, cache).run_sweep())
+        assert sweep3["to_long_term"] == 1
+        assert "lina:mps:t3:climber" not in cache.store
+        assert sum(1 for sql, _ in db.executes if "lina_memory_items" in sql) == 1
+        assert sum(1 for sql, _ in db.executes if "lina_promotion_log" in sql) == 3  # t1→t2, t2→t3, t3→active
+
+    def test_empty_sweep_is_noop(self):
+        db = FakeDB()
+        cache = FakeCache()
+        counts = asyncio.run(self._svc(db, cache).run_sweep())
+        assert all(v == 0 for v in counts.values())
+        assert db.executes == []
+
+    def test_orphan_is_purged(self):
+        """A t3 item whose user is gone (FK failure) is purged — the memory
+        is meaningless without her. Gone. No record."""
+        class FailingDB(FakeDB):
+            async def execute(self, sql: str, *args: Any) -> str:
+                if "lina_memory_items" in sql:
+                    raise Exception("foreign key violation: user gone")
+                return await super().execute(sql, *args)
+
+        db = FailingDB()
+        cache = FakeCache()
+        asyncio.run(self._seed(cache, "t3", self._item("orphan", 6.0)))
+        counts = asyncio.run(self._svc(db, cache).run_sweep())
+        assert counts["to_long_term"] == 0
+        assert counts["purged"] == 1
+        assert "lina:mps:t3:orphan" not in cache.store
