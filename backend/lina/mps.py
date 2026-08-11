@@ -22,7 +22,9 @@ from datetime import UTC, datetime
 from typing import Any, Callable
 
 import numpy as np
+from aiomisc import Service
 from aiomisc.service.periodic import PeriodicService
+from embeddings import EmbeddingClient
 
 from value_engine import (
     FORMATION_LONG_TERM_BYPASS,
@@ -967,3 +969,221 @@ class LegacyReviewService(PeriodicService):
             )
             counts["reviewed"] += 1
         return counts
+
+
+# =============================================================================
+# RECALL — remembering by likeness (MPS §5, Phase F)
+# =============================================================================
+
+# The two-space retrieval: semantic similarity finds the text, ethical
+# proximity finds the like moments, importance keeps the shape. Co-op weights.
+RECALL_WEIGHTS = {"importance": 0.5, "semantic": 0.3, "ethical": 0.2}
+
+
+def recall_score(importance: float, semantic: float, ethical: float) -> float:
+    """The blend: how much this memory deserves to surface right now."""
+    return (
+        importance * RECALL_WEIGHTS["importance"]
+        + semantic * RECALL_WEIGHTS["semantic"]
+        + ethical * RECALL_WEIGHTS["ethical"]
+    )
+
+
+def cosine(a: list[float] | None, b: list[float] | None) -> float:
+    """Cosine similarity — likeness in embedding space. 0.0 when either side
+    is missing (the auxiliary space degrades honestly)."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    try:
+        va = np.asarray(a, dtype=float)
+        vb = np.asarray(b, dtype=float)
+        denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
+        if denom == 0.0:
+            return 0.0
+        return float(np.dot(va, vb) / denom)
+    except Exception:
+        return 0.0
+
+
+def ethical_similarity(a: list[float] | None, b: list[float] | None) -> float:
+    """Ethical proximity in the polytope's space: 1/(1 + distance) — 1.0 at
+    the same point, approaching 0 far from it. 0.0 when either side is
+    missing."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    try:
+        va = np.asarray(a, dtype=float)
+        vb = np.asarray(b, dtype=float)
+        distance = float(np.linalg.norm(va - vb))
+        return 1.0 / (1.0 + distance)
+    except Exception:
+        return 0.0
+
+
+def _parse_vector(value: Any) -> list[float] | None:
+    """Parse a vector column: asyncpg returns FLOAT[] as a list and vector
+    columns as text ("[0.1, 0.2, …]"). None on garbage."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        try:
+            return [float(x) for x in value]
+        except Exception:
+            return None
+    try:
+        return [float(x) for x in json.loads(str(value))]
+    except Exception:
+        return None
+
+
+class MemoryRecallService(Service):
+    """Remembering by likeness (MPS §5, Phase F).
+
+    The query is projected into both spaces: an embedding (semantic
+    likeness) and an ethical vector (position in the polytope). Memories are
+    scored on the blend — importance keeps the shape, semantic finds the
+    text, ethical proximity finds the like moments.
+
+    Every recall re-stokes: reference_count climbs and last_referenced_at
+    refreshes — usage feedback feeds the monthly dial, and a subconscious
+    memory that is reached for again stops decaying (the slope anchors to
+    the latest reference).
+    """
+
+    def __init__(
+        self,
+        *,
+        db_provider: Callable[[], Any] | None = None,
+        cache_provider: Callable[[], Any] | None = None,
+        embedder: Any | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.db_provider = db_provider
+        self.cache_provider = cache_provider
+        self.embedder = embedder or EmbeddingClient()
+
+    async def start(self) -> None:
+        self.context["mps_recall"] = self
+        if self.embedder.available:
+            log.info(f"[mps] recall service live — embedding {self.embedder.model}")
+        else:
+            log.warning(
+                "[mps] recall service live — no embedding key; recall will use "
+                "importance + ethical proximity until one is configured"
+            )
+
+    async def stop(self, exception: Exception | None = None) -> None:
+        await self.embedder.aclose()
+
+    def _db(self) -> Any:
+        db = self.db_provider() if self.db_provider else None
+        if db is None:
+            raise RuntimeError("database pool not initialized")
+        return db
+
+    async def recall(
+        self,
+        *,
+        user_id: str,
+        query: str = "",
+        hemisphere: str | None = None,
+        limit: int = 5,
+        include_subconscious: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Top-N memories by the two-space blend. Every recalled memory is
+        re-stoked (reference_count + last_referenced_at)."""
+        db = self._db()
+        query_embedding = await self.embedder.embed(query)
+
+        # The query's ethical vector — her position in the polytope right now.
+        coords: list[float] | None = None
+        if query:
+            try:
+                engine = await create_value_engine_for_user(user_id, db)
+                coords = encode_coordinates(engine, query)
+            except Exception:
+                coords = None
+
+        statuses = "('active','legacy')" if not include_subconscious else "('active','legacy','subconscious')"
+        sql = f"SELECT * FROM lina_memory_items WHERE user_id = $1 AND status IN {statuses}"
+        args: list[Any] = [user_id]
+        if hemisphere:
+            sql += " AND hemisphere = $2"
+            args.append(hemisphere)
+        rows = await db.fetch(sql, *args)
+
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for row in rows:
+            row = dict(row)
+            embedding = _parse_vector(row.get("embedding"))
+            ethical = _parse_vector(row.get("ethical_coordinates"))
+            if embedding is None and query_embedding and row.get("narrative"):
+                # Lazy backfill: embed the narrative now, keep it for next time.
+                embedding = await self.embedder.embed(row["narrative"])
+                if embedding:
+                    await db.execute(
+                        "UPDATE lina_memory_items SET embedding = $2 WHERE item_id = $1",
+                        row["item_id"], embedding,
+                    )
+            sem = cosine(query_embedding, embedding)
+            eth = ethical_similarity(coords, ethical)
+            importance = float(row.get("importance_score") or 0.0) / 10.0
+            scored.append((recall_score(importance, sem, eth), row))
+
+        scored.sort(key=lambda pair: -pair[0])
+        top = [row for _, row in scored[:limit]]
+
+        # Re-stoke: usage feedback feeds the monthly dial; a subconscious
+        # memory reached for again stops decaying (slope anchors to the
+        # latest reference).
+        for row in top:
+            await db.execute(
+                """
+                UPDATE lina_memory_items
+                SET reference_count = reference_count + 1,
+                    last_referenced_at = NOW()
+                WHERE item_id = $1
+                """,
+                row["item_id"],
+            )
+        return top
+
+    async def inject_context(
+        self,
+        *,
+        user_id: str,
+        query: str = "",
+        personal_limit: int = 5,
+        wisdom_limit: int = 8,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """The active injection: what she carries into the conversation.
+
+        Personal memories (her relationships, her moments) and wisdom
+        memories (what she knows), each recalled by likeness to the present
+        moment. The legacy crown is injected separately, never filtered.
+        """
+        personal = await self.recall(
+            user_id=user_id, query=query, hemisphere="personal", limit=personal_limit,
+        )
+        wisdom = await self.recall(
+            user_id=user_id, query=query, hemisphere="impersonal", limit=wisdom_limit,
+        )
+        return {
+            "recent_episodic": [
+                {
+                    "narrative": row["narrative"],
+                    "emotional_marker": row.get("emotional_marker"),
+                    "importance": row.get("importance_score"),
+                }
+                for row in personal
+            ],
+            "key_semantic": [
+                {
+                    "concept": row.get("concept") or row["narrative"][:80],
+                    "understanding": row.get("understanding") or row["narrative"],
+                    "type": row.get("kind"),
+                }
+                for row in wisdom
+            ],
+        }

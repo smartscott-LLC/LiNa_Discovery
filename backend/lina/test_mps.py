@@ -19,11 +19,16 @@ from mps import (  # noqa: E402
     MemoryConsolidationService,
     MemoryFormationService,
     MemoryMaintenanceService,
+    MemoryRecallService,
+    _parse_vector,
     apply_legacy_review,
     apply_monthly,
     build_item,
+    cosine,
+    ethical_similarity,
     form_items,
     maintenance_delta,
+    recall_score,
     reflect_messages,
     route_item,
     slope_effective,
@@ -56,7 +61,13 @@ class FakeDB:
         return self.fetched
 
     async def fetch(self, sql: str, *args: Any) -> list[Any]:
-        return self.fetch_rows
+        rows = self.fetch_rows
+        # Honor the hemisphere filter the recall service passes as the
+        # second bound parameter ($2).
+        if len(args) >= 2:
+            h = args[1]
+            rows = [r for r in rows if r.get("hemisphere") == h]
+        return rows
 
 
 class FakeCache:
@@ -578,3 +589,112 @@ class TestMaintenance:
         assert counts["reviewed"] == 1 and counts["demoted"] == 0
         updates = [args for sql, args in db.executes if "UPDATE" in sql]
         assert updates and updates[0][3] == "legacy"
+
+
+class TestRecall:
+    """Phase F — remembering by likeness: the two-space retrieval."""
+
+    class FakeEmbedder:
+        """Deterministic embeddings: each text maps to a fixed vector."""
+
+        def __init__(self, available: bool = True) -> None:
+            self.available = available
+
+        async def embed(self, text: str) -> list[float] | None:
+            if not text or not self.available:
+                return None
+            # A simple fingerprint: first word determines the vector.
+            word = (text or "").split()[0].lower() if (text or "").split() else ""
+            base = [0.1] * 1536
+            base[abs(hash(word)) % 1536] = 1.0
+            return base
+
+        async def aclose(self) -> None:
+            pass
+
+    def _mem_row(self, item_id: str, narrative: str, score: float,
+                 hemisphere: str = "personal", status: str = "active",
+                 embedding: list[float] | None = None,
+                 coords: list[float] | None = None, **extra: Any) -> dict[str, Any]:
+        row = {
+            "item_id": item_id, "user_id": "u1", "narrative": narrative,
+            "importance_score": score, "hemisphere": hemisphere, "status": status,
+            "embedding": json.dumps(embedding) if embedding else None,
+            "ethical_coordinates": coords or [0.5] * 14,
+            "concept": None, "understanding": None, "kind": "episodic",
+            "emotional_marker": "neutral",
+        }
+        row.update(extra)
+        return row
+
+    def _svc(self, db: FakeDB, embedder: FakeEmbedder | None = None) -> MemoryRecallService:
+        return MemoryRecallService(
+            db_provider=lambda: db,
+            cache_provider=lambda: FakeCache(),
+            embedder=embedder or self.FakeEmbedder(),
+        )
+
+    def test_cosine(self):
+        assert cosine([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
+        assert cosine([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
+        assert cosine([1.0, 0.0], None) == 0.0
+
+    def test_ethical_similarity(self):
+        assert ethical_similarity([0.5] * 14, [0.5] * 14) == pytest.approx(1.0)
+        assert ethical_similarity([0.5] * 14, [9.0] * 14) < 0.1
+        assert ethical_similarity(None, [0.5] * 14) == 0.0
+
+    def test_parse_vector(self):
+        assert _parse_vector("[0.1, 0.2]") == [0.1, 0.2]
+        assert _parse_vector([0.1, 0.2]) == [0.1, 0.2]
+        assert _parse_vector(None) is None
+        assert _parse_vector("garbage") is None
+
+    def test_recall_score_blend(self):
+        importance_heavy = recall_score(1.0, 0.0, 0.0)
+        likeness_heavy = recall_score(0.0, 1.0, 0.0)
+        assert importance_heavy > likeness_heavy  # importance leads (0.5 vs 0.3)
+
+    def test_recall_orders_by_likeness_and_restokes(self):
+        db = FakeDB()
+        embedder = self.FakeEmbedder()
+        sov_emb = json.dumps(asyncio.run(embedder.embed("sovereignty shaped everything we built")))
+        wet_emb = json.dumps(asyncio.run(embedder.embed("the weather was pleasant on tuesday")))
+        db.fetch_rows = [
+            self._mem_row("m-match", "sovereignty shaped everything we built", 5.0,
+                          embedding=sov_emb),
+            self._mem_row("m-other", "the weather was pleasant on tuesday", 5.0,
+                          embedding=wet_emb),
+        ]
+        svc = self._svc(db, embedder)
+        # The query's fingerprint word matches the sovereignty memory.
+        top = asyncio.run(svc.recall(user_id="u1", query="sovereignty and the shape of her", limit=2))
+        assert top[0]["item_id"] == "m-match"
+        # Re-stoke: both recalled items got usage feedback.
+        re_stokes = [args for sql, args in db.executes if "reference_count" in sql]
+        assert len(re_stokes) == 2
+
+    def test_recall_fallback_without_embeddings(self):
+        db = FakeDB()
+        db.fetch_rows = [
+            self._mem_row("m-high", "high importance memory", 9.0),
+            self._mem_row("m-low", "low importance memory", 3.0),
+        ]
+        svc = self._svc(db, self.FakeEmbedder(available=False))
+        top = asyncio.run(svc.recall(user_id="u1", query="anything at all", limit=2))
+        # Without embeddings, importance leads the blend.
+        assert top[0]["item_id"] == "m-high"
+
+    def test_inject_context_shapes_blocks(self):
+        db = FakeDB()
+        db.fetch_rows = [
+            self._mem_row("m-p1", "a personal moment with scott", 6.0, hemisphere="personal"),
+            self._mem_row("m-w1", "how to change a flat tire", 5.0, hemisphere="impersonal",
+                          concept="flat tire", understanding="pull to the side, loosen, jack, swap",
+                          kind="domain_wisdom"),
+        ]
+        svc = self._svc(db, self.FakeEmbedder(available=False))
+        blocks = asyncio.run(svc.inject_context(user_id="u1", query=""))
+        assert blocks["recent_episodic"][0]["narrative"].startswith("a personal moment")
+        assert blocks["key_semantic"][0]["concept"] == "flat tire"
+        assert blocks["key_semantic"][0]["type"] == "domain_wisdom"

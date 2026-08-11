@@ -586,9 +586,14 @@ $$ LANGUAGE plpgsql;
 
 -- =============================================================================
 -- VIEW: lina_context_injection
--- Everything needed to make LINA feel like herself at the start of a session.
--- This is what gets injected — not a log dump, but her actual self.
+-- Identity fields + the legacy crown. The episodic and wisdom blocks are NOT
+-- computed here anymore — recall (MPS Phase F) shapes them by likeness to
+-- the present moment. No computed-but-discarded work.
 -- =============================================================================
+
+-- The leaner shape drops the two memory blocks; CREATE OR REPLACE cannot
+-- drop columns, so the view is dropped and recreated.
+DROP VIEW IF EXISTS lina_context_injection;
 
 CREATE OR REPLACE VIEW lina_context_injection AS
 SELECT
@@ -602,44 +607,6 @@ SELECT
     ic.relationship_depth,
     ic.lineage,
     ic.polytope_center,
-
-    -- Recent personal memories (top 5 by importance, active) — MPS Phase C
-    (
-        SELECT jsonb_agg(
-            jsonb_build_object(
-                'narrative', em.narrative,
-                'emotional_marker', em.emotional_marker,
-                'importance', em.importance_score
-            ) ORDER BY em.importance_score DESC
-        )
-        FROM (
-            SELECT * FROM lina_memory_items e
-            WHERE e.user_id = ic.user_id
-              AND e.hemisphere = 'personal'
-              AND e.status = 'active'
-            ORDER BY e.importance_score DESC, e.created_at DESC
-            LIMIT 5
-        ) em
-    ) AS recent_episodic,
-
-    -- Key wisdom memories (top 8 by importance, impersonal) — MPS Phase C
-    (
-        SELECT jsonb_agg(
-            jsonb_build_object(
-                'concept', sm.concept,
-                'understanding', sm.understanding,
-                'type', sm.kind
-            ) ORDER BY sm.importance_score DESC
-        )
-        FROM (
-            SELECT * FROM lina_memory_items s
-            WHERE s.user_id = ic.user_id
-              AND s.hemisphere = 'impersonal'
-              AND s.status = 'active'
-            ORDER BY s.importance_score DESC
-            LIMIT 8
-        ) sm
-    ) AS key_semantic,
 
     -- Identity memories (all legacy — never filtered, never forgotten)
     (
@@ -763,6 +730,14 @@ CREATE INDEX IF NOT EXISTS idx_mem_status     ON lina_memory_items(status);
 CREATE INDEX IF NOT EXISTS idx_mem_hemisphere ON lina_memory_items(hemisphere);
 CREATE INDEX IF NOT EXISTS idx_mem_importance ON lina_memory_items(importance_score DESC);
 CREATE INDEX IF NOT EXISTS idx_mem_last_ref   ON lina_memory_items(last_referenced_at DESC);
+
+-- The likeness half of recall (MPS §5, Phase F). Dimension set by the
+-- embedding model choice (EMBEDDING_DIMENSIONS, default 1536).
+ALTER TABLE lina_memory_items
+    ADD COLUMN IF NOT EXISTS embedding vector(1536);
+
+CREATE INDEX IF NOT EXISTS idx_mem_embedding
+    ON lina_memory_items USING hnsw (embedding vector_cosine_ops);
 
 
 -- The audit trail of growth: every promotion, at what score, with the reason.

@@ -64,8 +64,9 @@ CREATE TABLE lina_memory_items (
     -- The polytope mapping — the funding link made literal
     ethical_coordinates FLOAT[14],                -- NULL only for legacy rows migrated without
                                                  -- coordinates; new formations always set it
-    embedding           vector,                  -- Phase F: added with the embedding model choice
-                                                 -- (ALTER TABLE ADD COLUMN embedding vector(N))
+    embedding           vector(1536),             -- the likeness half of recall (Phase F):
+                                                 -- EMBEDDING_MODEL, default openai/text-embedding-3-small;
+                                                 -- HNSW cosine index, graceful degradation
 
     -- Valuation state
     importance_score    FLOAT NOT NULL DEFAULT 0.0,
@@ -109,9 +110,10 @@ CREATE INDEX idx_mem_last_ref    ON lina_memory_items(last_referenced_at DESC);
   coordinates carry NULL (honest — they predate the mapping); new formations
   always set it. NULL rows are excluded from ethical-proximity recall and are
   candidates for coordinates on the next monthly touch.
-- The **embedding column lands in Phase F** with the embedding-model choice
-  (`ALTER TABLE ADD COLUMN embedding vector(N)`); Phase B ships the ethical
-  mapping and the text.
+- **The embedding column landed in Phase F** — `vector(1536)`, HNSW cosine
+  index. The model is `EMBEDDING_MODEL` (default `openai/text-embedding-3-small`
+  via OpenRouter); failures degrade to importance + ethical proximity — the
+  vector space is auxiliary, the polytope mapping is primary.
 - The character floor is data, not a magic constant: `protected` items carry
   their floor; `must_keep` items are immovable (floor = score). The polytope's
   protected dimensions are the policy; this table is the record.

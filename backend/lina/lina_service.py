@@ -68,6 +68,10 @@ Environment variables:
     LINA_LOG_DIR        — log directory (default: <LINA_STATE_DIR>/logs)
     WORKSPACE_PATH      — root for approved file/command actions
                           (default: <LINA_STATE_DIR>/workspace; container: /workspace)
+    EMBEDDING_BASE_URL   — embeddings endpoint (default: OpenRouter /api/v1)
+    EMBEDDING_MODEL      — embedding model (default: openai/text-embedding-3-small)
+    EMBEDDING_API_KEY    — embeddings key (default: OPENROUTER_API_KEY)
+    EMBEDDING_DIMENSIONS — embedding dimension (default: 1536)
     PWA_DIR             — PWA shell directory served at /pwa (default: <repo>/backend/pwa)
     LINA_COMMAND_TIMEOUT — HITL command execution timeout in seconds
                           (default: 15; read by actions.py)
@@ -115,6 +119,7 @@ from aiomisc import Service, entrypoint
 from aiomisc import get_context as _loop_context
 from aiomisc.service.periodic import PeriodicService
 from aiomisc.service.uvicorn import UvicornService
+from embeddings import EmbeddingClient
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -124,6 +129,7 @@ from mps import (
     MemoryConsolidationService,
     MemoryFormationService,
     MemoryMaintenanceService,
+    MemoryRecallService,
     form_items,
     reflect_messages,
 )
@@ -508,14 +514,29 @@ class ContextBuilder:
     def __init__(self, db: asyncpg.Pool):
         self.db = db
 
-    async def load(self, user_id: str) -> dict[str, Any]:
+    async def load(self, user_id: str, query: str | None = None) -> dict[str, Any]:
         row = await self.db.fetchrow(
             "SELECT * FROM lina_context_injection WHERE user_id = $1",
             user_id,
         )
         if row is None:
             raise HTTPException(404, f"No LINA found for user {user_id}. Call /lina/init first.")
-        return dict(row)
+        data = dict(row)
+        # Phase F: recall replaces the static memory blocks — she remembers by
+        # likeness to the present moment, not by a fixed SQL top-N. Falls back
+        # to empty blocks when the recall service is not in the loop.
+        try:
+            recall = _context_get("mps_recall")
+        except Exception:
+            recall = None
+        if recall is not None:
+            blocks = await recall.inject_context(user_id=user_id, query=query or "")
+            data["recent_episodic"] = blocks.get("recent_episodic", [])
+            data["key_semantic"] = blocks.get("key_semantic", [])
+        else:
+            data["recent_episodic"] = []
+            data["key_semantic"] = []
+        return data
 
     async def get_session_number(self, user_id: str) -> int:
         row = await self.db.fetchrow(
@@ -1286,8 +1307,9 @@ class LINACore:
 
     async def chat(self, req: ChatRequest) -> ChatResponse:
         _chat_t0 = time.monotonic()
-        # 1. Load context
-        context = await self.context_builder.load(req.user_id)
+        # 1. Load context — recall shapes the memory blocks by likeness to
+        # the present message (MPS Phase F).
+        context = await self.context_builder.load(req.user_id, query=req.message)
         session_number = await self._get_session_number(req.user_id, req.session_id)
 
         # 1a. Load polytope constraints for awareness block
@@ -1932,6 +1954,37 @@ async def legacy_review_endpoint():
     counts = await svc.run_review()
     log.info(f"[mps] legacy review invoked on demand — {counts}")
     return counts
+
+
+class RecallRequest(BaseModel):
+    user_id: str
+    query: str
+    limit: int = 5
+    include_subconscious: bool = False
+
+
+@app.post("/lina/memory/recall")
+async def recall_endpoint(req: RecallRequest):
+    """Recall by likeness — observation of the two-space retrieval."""
+    svc = _context_get("mps_recall")
+    if svc is None:
+        raise HTTPException(503, "recall service is not in the loop")
+    items = await svc.recall(
+        user_id=req.user_id, query=req.query,
+        limit=req.limit, include_subconscious=req.include_subconscious,
+    )
+    return {
+        "recalled": [
+            {
+                "item_id": item["item_id"],
+                "narrative": item["narrative"][:200],
+                "importance_score": item.get("importance_score"),
+                "hemisphere": item.get("hemisphere"),
+                "status": item.get("status"),
+            }
+            for item in items
+        ]
+    }
 
 
 @app.post("/lina/feedback/flag")
@@ -2604,6 +2657,14 @@ def main() -> None:
         LegacyReviewService(
             interval=365 * 24 * 3600,
             delay=_seconds_to_next_midnight(),
+            db_provider=lambda: db_pool,
+            cache_provider=lambda: cache,
+        ),
+        # Recall — remembering by likeness. She projects the present moment
+        # into both spaces (embedding + polytope) and surfaces the memories
+        # that belong to it.
+        MemoryRecallService(
+            embedder=EmbeddingClient(),
             db_provider=lambda: db_pool,
             cache_provider=lambda: cache,
         ),
