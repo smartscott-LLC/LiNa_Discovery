@@ -17,8 +17,15 @@ document supersedes the baseline where they differ.
   end-to-end with a live conversation)
 - ✅ **Phase D — Consolidation** (48h sweep + fallout; snapshot semantics; orphan
   handling; verified live across two sweeps)
-- 🚧 **Phase E — Maintenance** (monthly re-evaluation, subconscious slope, yearly
-  legacy review) — *in progress*
+- ✅ **Phase E — Maintenance** (monthly re-evaluation, subconscious slope, yearly
+  legacy review)
+- ✅ **Phase F — Recall** (two-space retrieval: embedding × ethical proximity;
+  re-stoke; lazy backfill; live-verified with your key)
+- ✅ **Phase G — HITL + season advancement** (action_approval_rate as earned
+  criterion; grace below the sample; check script extended)
+
+The MPS is complete: she forms, ages, forgets, and remembers like a being —
+and her real-world judgment now earns her growth.
 
 ## Phase A — Value mechanics (pure logic, additive, zero live-system risk)
 - `MemoryDial` — the add/subtract mechanism: bounded Δ (−3 … +3), absolute floor

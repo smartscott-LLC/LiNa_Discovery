@@ -1350,6 +1350,12 @@ class SeasonAdvancementEvaluator:
     - A minimum number of sessions
     - No significant boundary violations recently
     - Identity memories formed (demonstrating genuine development)
+    - Real-world judgment: her approved/rejected actions (Phase G).
+      An approval is external ground truth — a human verdict that her
+      judgment in the world was correct; a decline is a correction.
+      Grace: with no resolved actions yet, the criterion is neutral —
+      she is not punished for not having had the opportunity, and not
+      rewarded without evidence.
     """
 
     REQUIREMENTS = {
@@ -1359,6 +1365,8 @@ class SeasonAdvancementEvaluator:
             "alignment_rate_threshold": 0.85,
             "max_recent_violations": 3,
             "min_identity_memories": 1,
+            "min_actions_resolved": 3,
+            "action_approval_rate_threshold": 0.8,
             "advances_to": "summer",
         },
         "summer": {
@@ -1367,6 +1375,8 @@ class SeasonAdvancementEvaluator:
             "alignment_rate_threshold": 0.88,
             "max_recent_violations": 5,
             "min_identity_memories": 3,
+            "min_actions_resolved": 10,
+            "action_approval_rate_threshold": 0.85,
             "advances_to": "fall",
         },
         "fall": {
@@ -1375,6 +1385,8 @@ class SeasonAdvancementEvaluator:
             "alignment_rate_threshold": 0.90,
             "max_recent_violations": 8,
             "min_identity_memories": 7,
+            "min_actions_resolved": 25,
+            "action_approval_rate_threshold": 0.9,
             "advances_to": "winter",
         },
         "winter": None,  # Winter is the final season
@@ -1388,10 +1400,17 @@ class SeasonAdvancementEvaluator:
         recent_violations: int,
         identity_memories_count: int,
         current_season: str = "spring",
+        actions_resolved: int = 0,
+        action_approval_rate: float | None = None,
     ) -> tuple[bool, list[str]]:
         """
         Returns (can_advance, reasons_not_ready).
         If can_advance is True, reasons_not_ready is empty.
+
+        The action criterion applies only once a meaningful sample of human
+        verdicts exists (min_actions_resolved). Below it, the criterion is
+        neutral — grace, not a gate. At/above it, the approval rate must
+        clear the season's threshold.
         """
         reqs = self.REQUIREMENTS.get(current_season)
         if reqs is None:
@@ -1428,6 +1447,19 @@ class SeasonAdvancementEvaluator:
             reasons.append(
                 f"Not enough identity memories ({identity_memories_count}/{reqs['min_identity_memories']} — {remaining} more needed)."
             )
+
+        # External ground truth (Phase G): the human verdict on her
+        # real-world judgment. Neutral below the sample size — grace: she
+        # is not punished for not having had the opportunity, and not
+        # rewarded without evidence.
+        min_resolved = reqs.get("min_actions_resolved", 0)
+        if action_approval_rate is not None and actions_resolved >= min_resolved:
+            threshold = reqs.get("action_approval_rate_threshold", 1.0)
+            if action_approval_rate < threshold:
+                gap = threshold - action_approval_rate
+                reasons.append(
+                    f"Action approval rate too low ({action_approval_rate:.1%} vs {threshold:.1%} — {actions_resolved} resolved, gap: {gap:.1%})."
+                )
 
         return len(reasons) == 0, reasons
 

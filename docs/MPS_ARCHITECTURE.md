@@ -275,6 +275,11 @@ scottBot's learning/feedback layer — rebuilt properly.)
   Adaptations never breach the character floor.
 - **Memory feedback:** outcomes feed the dial — a recalled approach that worked
   re-stokes its memory; one that failed invites the reflection to reconsider it.
+- **Advancement credit (Phase G):** the action approval rate is a season-
+  advancement criterion — external ground truth the polytope cannot measure.
+  Approved decisions earn growth; declined ones hold it back. Grace: with no
+  resolved actions yet, the criterion is neutral — never a gate without
+  evidence.
 
 The loop closes the triangle of the founding principles:
 experience → reflection → application → outcome → adjustment.

@@ -21,12 +21,13 @@ class FakeTransaction:
 
 class FakeDB:
     def __init__(self, season="spring", sessions=10, evals=60, aligned=54,
-                 identity_memories=3, winter=False):
+                 identity_memories=3, winter=False, actions=None):
         self.season = "winter" if winter else season
         self.sessions = sessions
         self.evals = evals
         self.aligned = aligned
         self.identity_memories = identity_memories
+        self.actions = actions or {}   # status -> count
         self.executed = []
         self.transactions = 0
         # current constraint row (spring defaults, as stored by the DB)
@@ -53,6 +54,8 @@ class FakeDB:
         return None
 
     async def fetch(self, query, *args):
+        if "lina_actions" in query:
+            return [{"status": s, "n": c} for s, c in self.actions.items()]
         if "is_aligned" in query:
             return [
                 {"is_aligned": i < self.aligned}
@@ -168,6 +171,66 @@ async def path_no_data():
 
 def test_no_data():
     asyncio.run(path_no_data())
+
+
+async def path_approved_actions_advance():
+    # 4 executed + 1 rejected → approval rate 0.8, resolved 5 ≥ 3 — with the
+    # in-loop criteria met, her real-world judgment earns the advancement.
+    db = FakeDB(season="spring", sessions=10, evals=60, aligned=54,
+                identity_memories=3,
+                actions={"executed": 4, "rejected": 1})
+    core = make_core(db)
+    r = await core.advance_season_if_ready("a", session_number=11)
+    assert r["advanced"] is True and r["season"] == "summer", r
+
+
+def test_approved_actions_advance():
+    asyncio.run(path_approved_actions_advance())
+
+
+async def path_declined_actions_block():
+    # 2 executed + 4 rejected → rate 0.33 — her real-world judgment is not
+    # conducive to the agenda; advancement is held.
+    db = FakeDB(season="spring", sessions=10, evals=60, aligned=54,
+                identity_memories=3,
+                actions={"executed": 2, "rejected": 4})
+    core = make_core(db)
+    r = await core.advance_season_if_ready("d", session_number=11)
+    assert r["advanced"] is False
+    assert any("approval rate" in x for x in r["reasons"]), r["reasons"]
+    assert db.transactions == 0 and not db.executed, "blocked must not write"
+
+
+def test_declined_actions_block():
+    asyncio.run(path_declined_actions_block())
+
+
+async def path_no_actions_is_neutral():
+    # No resolved actions yet — the criterion is neutral (grace), not a gate.
+    db = FakeDB(season="spring", sessions=10, evals=60, aligned=54,
+                identity_memories=3, actions={})
+    core = make_core(db)
+    r = await core.advance_season_if_ready("n", session_number=11)
+    assert r["advanced"] is True, r
+
+
+def test_no_actions_is_neutral():
+    asyncio.run(path_no_actions_is_neutral())
+
+
+async def path_below_sample_is_neutral():
+    # 2 resolved actions (below the sample of 3), both approved — grace:
+    # a tiny sample is not judged either way.
+    db = FakeDB(season="spring", sessions=10, evals=60, aligned=54,
+                identity_memories=3,
+                actions={"executed": 2})
+    core = make_core(db)
+    r = await core.advance_season_if_ready("b", session_number=11)
+    assert r["advanced"] is True, r
+
+
+def test_below_sample_is_neutral():
+    asyncio.run(path_below_sample_is_neutral())
 
 
 def main():

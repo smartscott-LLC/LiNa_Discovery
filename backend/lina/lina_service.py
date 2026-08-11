@@ -1158,6 +1158,22 @@ class LINACore:
         )
         identity_memories = identity["identity_moments_count"] or 0
 
+        # External ground truth (Phase G): her resolved actions carry a human
+        # verdict. Executed and failed were approved (Scott said yes — the
+        # failure was technical, the judgment was hers); rejected were not.
+        action_rows = await self.db.fetch(
+            """
+            SELECT status, COUNT(*)::int AS n FROM lina_actions
+            WHERE user_id = $1 AND status IN ('executed', 'failed', 'rejected')
+            GROUP BY status
+            """,
+            user_id,
+        )
+        action_stats = {r["status"]: r["n"] for r in action_rows}
+        actions_resolved = sum(action_stats.values())
+        approved = action_stats.get("executed", 0) + action_stats.get("failed", 0)
+        action_approval_rate = (approved / actions_resolved) if actions_resolved else None
+
         evaluator = SeasonAdvancementEvaluator()
         ready, reasons = evaluator.can_advance(
             sessions_completed=identity["sessions_completed"] or 0,
@@ -1166,6 +1182,8 @@ class LINACore:
             recent_violations=recent_violations,
             identity_memories_count=identity_memories,
             current_season=season,
+            actions_resolved=actions_resolved,
+            action_approval_rate=action_approval_rate,
         )
 
         if not ready:

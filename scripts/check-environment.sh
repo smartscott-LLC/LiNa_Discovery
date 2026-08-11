@@ -126,6 +126,24 @@ else
     warn "no LINA service on :8001 — run the aiomisc entrypoint (python -m lina_service)"
 fi
 
+# ── 9. Memory Imprint System ──────────────────────────────────────────────────
+echo
+echo "── Memory Imprint System ──"
+pg_user=$(grep -E '^POSTGRES_USER=' .env 2>/dev/null | head -1 | cut -d= -f2-)
+pg_db=$(grep -E '^POSTGRES_DB=' .env 2>/dev/null | head -1 | cut -d= -f2-)
+if command -v docker >/dev/null 2>&1 && [ -n "$pg_user" ] && [ -n "$pg_db" ]; then
+    for tbl in lina_memory_items lina_promotion_log lina_feedback lina_learning_patterns lina_adaptations; do
+        exists=$(docker exec collabsmart-postgres psql -U "$pg_user" -d "$pg_db" -tAc "SELECT to_regclass('public.$tbl');" 2>/dev/null)
+        if [ "$exists" = "$tbl" ] || [ "$exists" = "public.$tbl" ]; then
+            ok "MPS table $tbl present"
+        else
+            fail "MPS table $tbl MISSING"
+        fi
+    done
+else
+    warn "cannot verify MPS tables (docker or .env db config missing)"
+fi
+
 echo
 echo "──────────────────────────────────────────────────────────────"
 echo "Result: $PASS ok, $WARN warnings, $FAIL failures"
