@@ -333,7 +333,7 @@ class MemoryFormationService(PeriodicService):
 
     def _voice(self) -> Any:
         try:
-            voice = self.context.get("voice_pool")
+            voice = self.context["voice_pool"]
         except Exception:
             voice = None
         if voice is None:

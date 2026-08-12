@@ -1,44 +1,44 @@
 /* =============================================================================
    LINA THEME — the color scheme of her face.
-   This file is YOURS. Replace any value with your exact hex / rgba / rgb
-   numbers and the whole interface re-skins — the PWA reads only these
-   variables. Brand violet (#7c3aed) is the starter seed.
+   YOUR palette (assets/palette_good / palette.txt): black, prussian blue,
+   orange, alabaster grey, white. Replace any value and the whole interface
+   re-skins — the PWA reads only these variables.
    ========================================================================== */
 
 :root {
-  /* ── Brand ─────────────────────────────────────────────────────────────── */
-  --lina-primary:        #7c3aed;                 /* her violet */
-  --lina-primary-rgb:    124, 58, 237;            /* rgb() form for alpha */
-  --lina-accent:         #a78bfa;                 /* lighter violet */
-  --lina-glow:           rgba(124, 58, 237, 0.55);
+  /* ── Brand — her fire ──────────────────────────────────────────────────── */
+  --lina-primary:        #fca311;                 /* orange */
+  --lina-primary-rgb:    252, 163, 17;            /* rgb() form for alpha */
+  --lina-accent:         #ffbe3d;                 /* lighter orange */
+  --lina-glow:           rgba(252, 163, 17, 0.45);
 
-  /* ── Surfaces ──────────────────────────────────────────────────────────── */
-  --surface-0:           #0b0a12;                 /* deepest background */
-  --surface-1:           #14121f;                 /* window background */
-  --surface-2:           #1d1a2c;                 /* raised cards */
-  --surface-3:           #262238;                 /* hover / pressed */
+  /* ── Surfaces — black & prussian blue ──────────────────────────────────── */
+  --surface-0:           #050505;                 /* deepest black */
+  --surface-1:           #0c101d;                 /* window — black-blue */
+  --surface-2:           #14213d;                 /* prussian blue */
+  --surface-3:           #1e2c52;                 /* lifted prussian */
 
-  /* ── Text ──────────────────────────────────────────────────────────────── */
-  --text-hi:             #f4f2fb;                 /* primary text */
-  --text-mid:            #b9b3d1;                 /* secondary text */
-  --text-low:            #7c7596;                 /* muted text */
+  /* ── Text — alabaster & white ──────────────────────────────────────────── */
+  --text-hi:             #ffffff;                 /* primary text */
+  --text-mid:            #e5e5e5;                 /* alabaster grey */
+  --text-low:            #97a2ba;                 /* muted blue-grey */
 
   /* ── Status ────────────────────────────────────────────────────────────── */
-  --ok:                  #34d399;                 /* healthy */
-  --warn:                #fbbf24;                 /* caution */
-  --err:                 #f87171;                 /* failure */
-  --info:                #60a5fa;                 /* informational */
+  --ok:                  #34d399;
+  --warn:                #fbbf24;
+  --err:                 #f87171;
+  --info:                #60a5fa;
 
   /* ── Chat ──────────────────────────────────────────────────────────────── */
-  --chat-user:           rgba(var(--lina-primary-rgb), 0.16);   /* your bubbles */
-  --chat-lina:           var(--surface-2);                       /* her bubbles */
-  --chat-border:         rgba(var(--lina-primary-rgb), 0.28);
+  --chat-user:           rgba(252, 163, 17, 0.14);   /* your bubbles — orange tint */
+  --chat-lina:           #14213d;                     /* her bubbles — prussian blue */
+  --chat-border:         rgba(252, 163, 17, 0.30);
 
   /* ── Lines & shadows ───────────────────────────────────────────────────── */
-  --border:              rgba(244, 242, 251, 0.08);
-  --border-strong:       rgba(244, 242, 251, 0.16);
-  --shadow:              0 18px 50px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--border);
-  --shadow-soft:         0 8px 24px rgba(0, 0, 0, 0.4);
+  --border:              rgba(255, 255, 255, 0.08);
+  --border-strong:       rgba(255, 255, 255, 0.16);
+  --shadow:              0 18px 50px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--border);
+  --shadow-soft:         0 8px 24px rgba(0, 0, 0, 0.45);
 
   /* ── Geometry & motion ─────────────────────────────────────────────────── */
   --radius:              16px;

@@ -100,6 +100,11 @@ services:
       # Actions approved through the HITL ledger execute here — her shared
       # workspace, where her files live.
       - workspace:/workspace
+      # Live design surface: your theme and the shell mount read-only from
+      # the host, so color and UI edits appear without a rebuild (the image
+      # still bakes defaults for deployment).
+      - ./assets:/app/assets:ro
+      - ./backend/pwa:/app/pwa:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/lina/health')"]
       interval: 15s

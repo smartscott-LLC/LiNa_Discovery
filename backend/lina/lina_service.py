@@ -969,7 +969,7 @@ class MemoryFormation:
             )
 
         # Form scored items with ethical coordinates — T1 or straight to long-term
-        if moments:
+        if moments and self.engine_factory is not None:
             engine = await self.engine_factory(user_id)
             counts = await form_items(
                 db=self.db, cache=self.cache, engine=engine, user_id=user_id,

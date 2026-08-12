@@ -6,7 +6,7 @@ The service's trigger path is exercised with providers over fakes.
 import asyncio
 import json
 import sys
-from typing import Any
+from typing import Any, cast
 
 sys.path.insert(0, "/home/server/LiNa_Discovery/backend/lina")
 
@@ -315,11 +315,11 @@ class TestSweep:
     """Phase D — the 48-hour tier clock: promote, fall out, repurpose, purge."""
 
     def _svc(self, db: FakeDB, cache: FakeCache) -> MemoryConsolidationService:
-        return MemoryConsolidationService(
+        return cast(MemoryConsolidationService, MemoryConsolidationService(
             interval=3600,
             db_provider=lambda: db,
             cache_provider=lambda: cache,
-        )
+        ))
 
     def _item(self, item_id: str, score: float, **extra: Any) -> dict[str, Any]:
         base = {
@@ -614,7 +614,7 @@ class TestRecall:
 
     def _mem_row(self, item_id: str, narrative: str, score: float,
                  hemisphere: str = "personal", status: str = "active",
-                 embedding: list[float] | None = None,
+                 embedding: list[float] | str | None = None,
                  coords: list[float] | None = None, **extra: Any) -> dict[str, Any]:
         row = {
             "item_id": item_id, "user_id": "u1", "narrative": narrative,
@@ -628,11 +628,11 @@ class TestRecall:
         return row
 
     def _svc(self, db: FakeDB, embedder: FakeEmbedder | None = None) -> MemoryRecallService:
-        return MemoryRecallService(
+        return cast(MemoryRecallService, MemoryRecallService(
             db_provider=lambda: db,
             cache_provider=lambda: FakeCache(),
             embedder=embedder or self.FakeEmbedder(),
-        )
+        ))
 
     def test_cosine(self):
         assert cosine([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)

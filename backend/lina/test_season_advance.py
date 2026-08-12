@@ -5,6 +5,7 @@ import sys
 sys.path.insert(0, "/home/server/LiNa_Discovery/backend/lina")
 
 from lina_service import LINACore, SEASON_ADVANCE_VOICE
+from typing import Any, cast
 
 # ---------------------------------------------------------------------------
 # Fake asyncpg pool
@@ -92,7 +93,7 @@ class FakeCache:
 
 
 def make_core(db):
-    core = LINACore(db, FakeCache(), None)
+    core = LINACore(db, cast(Any, FakeCache()), None)
     return core
 
 
