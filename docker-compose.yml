@@ -52,8 +52,8 @@ services:
 
   lina:
     build:
-      context: ./backend
-      dockerfile: lina/Dockerfile
+      context: .
+      dockerfile: backend/lina/Dockerfile
     container_name: collabsmart-lina
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-collabsmart}:${POSTGRES_PASSWORD:-collabsmart}@postgres:5432/${POSTGRES_DB:-collabsmart}
@@ -78,9 +78,10 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LINA_MAX_TOKENS=${LINA_MAX_TOKENS:-4096}
       - LINA_VOICE_MAX_CONCURRENT=${LINA_VOICE_MAX_CONCURRENT:-4}
-      # Her desk inside the container (state + PWA shell).
+      # Her desk inside the container (state + PWA shell + theme).
       - LINA_STATE_DIR=/app/runtime
       - PWA_DIR=/app/pwa
+      - ASSETS_DIR=/app/assets
       - WORKSPACE_PATH=/workspace
       # Optional services (opt-in).
       - METRICS_ENABLED=${METRICS_ENABLED:-0}

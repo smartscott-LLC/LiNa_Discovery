@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgmp10 curl build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY lina/requirements.txt requirements.txt
+COPY backend/lina/requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Rust toolchain (minimal profile) — builds Triton, the Rust spoke that
@@ -20,16 +20,18 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --pr
     && rustc --version
 
 # Shared Rust core + Triton consumer (the spoke).
-COPY ipc-core ./ipc-core
-COPY triton ./triton
+COPY backend/ipc-core ./ipc-core
+COPY backend/triton ./triton
 RUN cd triton && cargo build --release \
        && cp target/release/triton /usr/local/bin/triton \
        && cd ..
 
 # LINA identity service (entrypoint: python -m lina_service).
-COPY lina/ .
+COPY backend/lina/ .
 # PWA shell (Phase 3) — her interface, served by her own service at /pwa.
-COPY pwa/ ./pwa
+COPY backend/pwa/ ./pwa
+# Her theme — the color scheme, yours to own, served at /assets.
+COPY assets/ ./assets
 
 EXPOSE 8001
 

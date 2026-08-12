@@ -74,6 +74,7 @@ Environment variables:
     EMBEDDING_REFERER    — optional; HTTP-Referer for rankings on openrouter.ai
     EMBEDDING_TITLE      — optional; X-OpenRouter-Title for rankings
     PWA_DIR             — PWA shell directory served at /pwa (default: <repo>/backend/pwa)
+    ASSETS_DIR          — her theme directory served at /assets (default: <repo>/assets)
     LINA_COMMAND_TIMEOUT — HITL command execution timeout in seconds
                           (default: 15; read by actions.py)
     LINA_ACCESS_ROOTS   — colon-separated absolute directories she may reach
@@ -2305,9 +2306,106 @@ class ActionUserRequest(BaseModel):
     user_id: str
 
 
+# =============================================================================
+# STANDING GRANTS — pre-authorized action types (her autonomy settings)
+# =============================================================================
+
+GRANTABLE_ACTION_TYPES = ["file_read", "file_write", "command", "tool", "opfs_read", "opfs_write"]
+
+SEASON_GRANT_GUIDANCE = {
+    "spring": "Spring — she asks before most things, and earns the asking.",
+    "summer": "Summer — trust is demonstrated; a few quiet permissions feel earned.",
+    "fall": "Fall — real history; she carries it carefully, and may act more freely.",
+    "winter": "Winter — she has earned her place and stands nearly on her own.",
+}
+
+
+def grant_allows(standing_grants: dict[str, Any] | None, action_type: str) -> bool:
+    """Does a standing grant pre-authorize this action type? Grants are
+    opt-in per type; an unknown type is never granted."""
+    if not standing_grants:
+        return False
+    return bool(standing_grants.get(action_type))
+
+
+async def _get_standing_grants(user_id: str) -> dict[str, Any]:
+    row = await _require_pool().fetchrow(
+        "SELECT standing_grants FROM lina_identity_core WHERE user_id = $1",
+        user_id,
+    )
+    grants = (row or {}).get("standing_grants") or {}
+    if isinstance(grants, str):
+        try:
+            grants = json.loads(grants)
+        except Exception:
+            grants = {}
+    return grants if isinstance(grants, dict) else {}
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """JSONB columns come back from asyncpg as text — parse defensively."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+class SettingsRequest(BaseModel):
+    standing_grants: dict[str, bool]
+
+
+@app.get("/lina/settings/{user_id}")
+async def get_settings(user_id: str):
+    """Her autonomy settings — the standing grants, her season, and the
+    per-season guidance that keeps the settings in line with where she is."""
+    row = await _require_pool().fetchrow(
+        """
+        SELECT current_season, relationship_depth, standing_grants
+        FROM lina_identity_core WHERE user_id = $1
+        """,
+        user_id,
+    )
+    if row is None:
+        raise HTTPException(404, f"No LINA found for user {user_id}. Call /lina/init first.")
+    season = row["current_season"] or "spring"
+    grants = _as_dict(row["standing_grants"])
+    return {
+        "user_id": user_id,
+        "season": season,
+        "relationship_depth": row["relationship_depth"] or "new",
+        "standing_grants": grants,
+        "grantable_types": GRANTABLE_ACTION_TYPES,
+        "season_guidance": SEASON_GRANT_GUIDANCE[season],
+        "season_guidance_all": SEASON_GRANT_GUIDANCE,
+    }
+
+
+@app.put("/lina/settings/{user_id}")
+async def put_settings(user_id: str, req: SettingsRequest):
+    """Save her autonomy settings. Grants are per action type; only
+    grantable types are stored — anything else is dropped."""
+    clean = {k: bool(v) for k, v in req.standing_grants.items() if k in GRANTABLE_ACTION_TYPES}
+    await _require_pool().execute(
+        """
+        UPDATE lina_identity_core
+        SET standing_grants = $2, updated_at = NOW()
+        WHERE user_id = $1
+        """,
+        user_id, json.dumps(clean),
+    )
+    log.info("[settings] %s standing grants updated: %s", user_id, clean)
+    return {"user_id": user_id, "standing_grants": clean}
+
+
 @app.post("/lina/actions/propose")
 async def propose_action(req: ProposeActionRequest):
-    """LINA proposes an action. Nothing executes until approved."""
+    """LINA proposes an action. A standing grant may pre-authorize it —
+    then it executes immediately, still audited, marked as granted."""
     if _action_store is None:
         raise HTTPException(503, "action store not initialized")
     try:
@@ -2321,6 +2419,35 @@ async def propose_action(req: ProposeActionRequest):
         )
     except ActionError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+    # Standing grant (her autonomy settings): pre-authorized types execute
+    # without a prompt — the consent was given in advance, and the ledger
+    # still records it.
+    try:
+        if grant_allows(await _get_standing_grants(req.user_id), req.action_type):
+            claimed = await _action_store.claim(action["id"])
+            if claimed is not None:
+                result = await execute_action(claimed)
+                await _action_store.finalize(action["id"], result["ok"], result["output"])
+                status = "executed" if result["ok"] else "failed"
+                await _require_pool().execute(
+                    "UPDATE lina_actions SET audit = audit || '{\"standing_grant\": true}'::jsonb WHERE id = $1",
+                    action["id"],
+                )
+                _emit_event(
+                    "action", id=action["id"], status=status,
+                    type=req.action_type, standing_grant=True,
+                )
+                log.info(
+                    "[actions] %s %s auto-approved by standing grant: %s",
+                    req.user_id, req.action_type, req.description[:80],
+                )
+                return {"status": status, "output": result["output"], "standing_grant": True}
+    except Exception as exc:
+        # A grant failure must never silently lose the proposal — it stays
+        # pending for manual approval.
+        log.warning(f"[actions] standing-grant path failed ({exc}) — action remains pending")
+
     _emit_event("action", id=action["id"], status="pending", type=action["action_type"])
     log.info("[actions] %s proposed %s: %s", req.user_id, req.action_type, req.description[:80])
     return {"status": "proposed", "action": action}
@@ -2495,6 +2622,15 @@ if os.path.isdir(PWA_DIR):
     log.info("[pwa] shell served from %s at /pwa", PWA_DIR)
 else:
     log.warning("[pwa] PWA_DIR %s missing — shell not mounted", PWA_DIR)
+
+# Her theme — the color scheme lives in the repo-root assets/ folder, yours
+# to own. The PWA reads only its CSS custom properties.
+ASSETS_DIR = os.getenv("ASSETS_DIR", os.path.join(_REPO_ROOT, "assets"))
+if os.path.isdir(ASSETS_DIR):
+    app.mount("/assets", StaticFiles(directory=ASSETS_DIR, html=True), name="assets")
+    log.info("[assets] theme served from %s at /assets", ASSETS_DIR)
+else:
+    log.warning("[assets] ASSETS_DIR %s missing — theme not mounted", ASSETS_DIR)
 
 
 # =============================================================================

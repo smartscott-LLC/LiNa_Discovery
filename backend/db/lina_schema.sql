@@ -673,7 +673,8 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- the floor policy. Policy is tunable by design — grace, not brittleness.
 ALTER TABLE lina_identity_core
     ADD COLUMN IF NOT EXISTS founding_values JSONB,
-    ADD COLUMN IF NOT EXISTS floor_policy  JSONB;
+    ADD COLUMN IF NOT EXISTS floor_policy  JSONB,
+    ADD COLUMN IF NOT EXISTS standing_grants JSONB;   -- pre-authorized action types
 
 CREATE TABLE IF NOT EXISTS lina_memory_items (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),

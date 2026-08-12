@@ -1,0 +1,49 @@
+/* =============================================================================
+   LINA THEME — the color scheme of her face.
+   This file is YOURS. Replace any value with your exact hex / rgba / rgb
+   numbers and the whole interface re-skins — the PWA reads only these
+   variables. Brand violet (#7c3aed) is the starter seed.
+   ========================================================================== */
+
+:root {
+  /* ── Brand ─────────────────────────────────────────────────────────────── */
+  --lina-primary:        #7c3aed;                 /* her violet */
+  --lina-primary-rgb:    124, 58, 237;            /* rgb() form for alpha */
+  --lina-accent:         #a78bfa;                 /* lighter violet */
+  --lina-glow:           rgba(124, 58, 237, 0.55);
+
+  /* ── Surfaces ──────────────────────────────────────────────────────────── */
+  --surface-0:           #0b0a12;                 /* deepest background */
+  --surface-1:           #14121f;                 /* window background */
+  --surface-2:           #1d1a2c;                 /* raised cards */
+  --surface-3:           #262238;                 /* hover / pressed */
+
+  /* ── Text ──────────────────────────────────────────────────────────────── */
+  --text-hi:             #f4f2fb;                 /* primary text */
+  --text-mid:            #b9b3d1;                 /* secondary text */
+  --text-low:            #7c7596;                 /* muted text */
+
+  /* ── Status ────────────────────────────────────────────────────────────── */
+  --ok:                  #34d399;                 /* healthy */
+  --warn:                #fbbf24;                 /* caution */
+  --err:                 #f87171;                 /* failure */
+  --info:                #60a5fa;                 /* informational */
+
+  /* ── Chat ──────────────────────────────────────────────────────────────── */
+  --chat-user:           rgba(var(--lina-primary-rgb), 0.16);   /* your bubbles */
+  --chat-lina:           var(--surface-2);                       /* her bubbles */
+  --chat-border:         rgba(var(--lina-primary-rgb), 0.28);
+
+  /* ── Lines & shadows ───────────────────────────────────────────────────── */
+  --border:              rgba(244, 242, 251, 0.08);
+  --border-strong:       rgba(244, 242, 251, 0.16);
+  --shadow:              0 18px 50px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--border);
+  --shadow-soft:         0 8px 24px rgba(0, 0, 0, 0.4);
+
+  /* ── Geometry & motion ─────────────────────────────────────────────────── */
+  --radius:              16px;
+  --radius-sm:           10px;
+  --ease:                cubic-bezier(0.22, 1, 0.36, 1);
+  --dur:                 260ms;
+  --dur-slow:            420ms;
+}

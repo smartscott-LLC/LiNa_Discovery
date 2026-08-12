@@ -7,95 +7,99 @@
   <title>LINA</title>
   <link rel="manifest" href="/pwa/manifest.webmanifest">
   <link rel="icon" href="/pwa/icons/icon.svg" type="image/svg+xml">
+  <!-- Her theme — yours to own; the shell reads only its variables -->
+  <link rel="stylesheet" href="/assets/theme.css">
   <link rel="stylesheet" href="/pwa/styles.css">
 </head>
 <body>
-  <header id="topbar">
-    <div class="brand">
-      <img src="/pwa/icons/icon.svg" alt="LINA" width="28" height="28">
-      <span class="brand-name">LINA</span>
-      <span id="season-chip" class="chip" title="season">spring</span>
-    </div>
-    <div class="status">
-      <span id="chip-bridge" class="chip">bridge …</span>
-      <span id="chip-voice" class="chip">voice …</span>
-      <span id="chip-db" class="chip">db …</span>
-      <span id="chip-sw" class="chip">offline-ready …</span>
-    </div>
-  </header>
 
-  <nav id="tabs">
-    <button class="tab active" data-tab="chat">Chat</button>
-    <button class="tab" data-tab="actions">Actions <span id="pending-count" class="count" hidden>0</span></button>
-    <button class="tab" data-tab="telemetry">Telemetry</button>
-    <button class="tab" data-tab="files">Files</button>
-  </nav>
+  <!-- Floating presence — her launcher -->
+  <button id="launcher" class="launcher" aria-label="Open LINA" title="LINA">
+    <span class="launcher-core">◆</span>
+    <span id="launcher-badge" class="badge" hidden>0</span>
+  </button>
 
-  <main>
-    <!-- ── Chat ─────────────────────────────────────────────────────────── -->
-    <section id="panel-chat" class="panel active">
-      <div id="chat-log" class="log" aria-live="polite"></div>
-      <form id="chat-form" class="input-row">
-        <input id="chat-input" type="text" placeholder="Say something to LINA…" autocomplete="off">
-        <button type="submit">Send</button>
+  <!-- The chat window — floating, draggable, expandable -->
+  <section id="chat-window" class="window" aria-label="LINA chat" hidden>
+    <header id="chat-head" class="window-head">
+      <div class="brand-row">
+        <img src="/pwa/icons/icon.svg" alt="" width="26" height="26">
+        <span class="brand-name">LINA</span>
+        <span id="season-chip" class="chip" title="season">spring</span>
+        <span id="think-dot" class="think" title="thinking" hidden></span>
+      </div>
+      <div class="status-row">
+        <span id="chip-bridge" class="chip">bridge …</span>
+        <span id="chip-voice" class="chip">voice …</span>
+        <span id="chip-db" class="chip">db …</span>
+        <span id="chip-sw" class="chip">offline-ready …</span>
+      </div>
+      <div class="head-actions">
+        <button id="btn-log" class="icon-btn" title="Her log (slide-out)" aria-label="Log drawer">⌘</button>
+        <button id="btn-settings" class="icon-btn" title="Settings" aria-label="Settings">⚙</button>
+        <button id="btn-max" class="icon-btn" title="Expand / contract" aria-label="Expand">⤢</button>
+        <button id="btn-min" class="icon-btn" title="Minimize" aria-label="Minimize">—</button>
+      </div>
+    </header>
+
+    <!-- A proposal waiting for you, surfaced where you can see it -->
+    <div id="pending-strip" class="pending-strip" hidden></div>
+
+    <div id="chat-log" class="log"></div>
+
+    <form id="chat-form" class="input-row" autocomplete="off">
+      <input id="chat-input" type="text" placeholder="Say something to LINA…" aria-label="Message">
+      <button type="submit" class="send-btn">Send</button>
+    </form>
+  </section>
+
+  <!-- Her log — slides out from the right -->
+  <aside id="log-drawer" class="drawer drawer-right" aria-label="Her log" hidden>
+    <header class="drawer-head">
+      <span class="drawer-title">Her Log — live</span>
+      <div class="drawer-tools">
+        <button id="log-clear" class="mini-btn">clear</button>
+        <button id="log-close" class="icon-btn" aria-label="Close">×</button>
+      </div>
+    </header>
+    <div class="drawer-tabs">
+      <button class="dtab active" data-dtab="live">Live</button>
+      <button class="dtab" data-dtab="actions">Actions</button>
+    </div>
+    <div id="dtab-live" class="dtab-panel">
+      <pre id="telemetry-feed" class="feed"></pre>
+    </div>
+    <div id="dtab-actions" class="dtab-panel" hidden>
+      <h3 class="dtab-title">Awaiting your approval</h3>
+      <div id="drawer-pending" class="stack"></div>
+      <h3 class="dtab-title">Audit trail</h3>
+      <div id="drawer-audit" class="stack small"></div>
+      <h3 class="dtab-title">Propose a test action</h3>
+      <form id="propose-command" class="stack">
+        <input name="description" placeholder="Description (what and why)" required>
+        <input name="command" placeholder="Shell command to run in the workspace" required>
+        <button type="submit" class="mini-btn">Propose command</button>
       </form>
-    </section>
+      <form id="propose-write" class="stack">
+        <input name="description" placeholder="Description" required>
+        <input name="path" placeholder="Path within the workspace (e.g. notes/idea.txt)" required>
+        <textarea name="content" placeholder="File content" rows="3" required></textarea>
+        <button type="submit" class="mini-btn">Propose file write</button>
+      </form>
+    </div>
+  </aside>
 
-    <!-- ── Actions (human-in-the-loop) ──────────────────────────────────── -->
-    <section id="panel-actions" class="panel">
-      <div class="grid-2">
-        <div>
-          <h2>Propose</h2>
-          <form id="propose-command" class="stack">
-            <input name="description" placeholder="Description (what and why)" required>
-            <input name="command" placeholder="Shell command to run in the workspace" required>
-            <button type="submit">Propose command</button>
-          </form>
-          <form id="propose-write" class="stack">
-            <input name="description" placeholder="Description" required>
-            <input name="path" placeholder="Path within an access root (e.g. notes/idea.txt or /home/server/lina/…) " required>
-            <textarea name="content" placeholder="File content" rows="4" required></textarea>
-            <button type="submit">Propose file write</button>
-          </form>
-        </div>
-        <div>
-          <h2>Pending <span id="pending-count-2"></span></h2>
-          <div id="pending-list" class="stack"></div>
-        </div>
-      </div>
-      <h2>Audit trail</h2>
-      <div id="audit-list" class="stack small"></div>
-    </section>
+  <!-- Settings — slides out from the left -->
+  <aside id="settings-drawer" class="drawer drawer-left" aria-label="Settings" hidden>
+    <header class="drawer-head">
+      <span class="drawer-title">Settings</span>
+      <button id="settings-close" class="icon-btn" aria-label="Close">×</button>
+    </header>
+    <div id="settings-body" class="settings-body"></div>
+  </aside>
 
-    <!-- ── Telemetry ────────────────────────────────────────────────────── -->
-    <section id="panel-telemetry" class="panel">
-      <div class="grid-3" id="metric-cards"></div>
-      <h2>Live feed</h2>
-      <pre id="telemetry-feed" class="log mono"></pre>
-    </section>
+  <div id="overlay" class="overlay" hidden></div>
 
-    <!-- ── Files (OPFS + workspace) ─────────────────────────────────────── -->
-    <section id="panel-files" class="panel">
-      <div class="grid-2">
-        <div>
-          <h2>Browser vault (OPFS)</h2>
-          <div class="stack">
-            <button id="opfs-root">Open OPFS root</button>
-            <button id="opfs-picker">Open a folder (File System Access API)</button>
-            <p class="hint">OPFS is browser-managed storage — safe, but it lives inside the browser. To move something onto your real disk, read it here and propose a write on the Actions tab.</p>
-            <div id="opfs-browser" class="log mono small"></div>
-          </div>
-        </div>
-        <div>
-          <h2>Your filesystem (approved actions only)</h2>
-          <p class="hint">This is where she touches your real disk — the workspace plus whatever you granted in LINA_ACCESS_ROOTS. Every read, write, and command executes only after you approve it on the Actions tab.</p>
-          <div id="ws-status" class="hint"></div>
-        </div>
-      </div>
-    </section>
-  </main>
-
-  <script src="/pwa/opfs.js"></script>
   <script src="/pwa/app.js"></script>
 </body>
 </html>
