@@ -18,7 +18,7 @@
 
 "use strict";
 
-const VERSION = "lina-shell-v1";
+const VERSION = "lina-shell-v2";
 const SHELL_CACHE = VERSION;
 
 const SHELL_URLS = [
@@ -26,9 +26,9 @@ const SHELL_URLS = [
   "/pwa/index.html",
   "/pwa/styles.css",
   "/pwa/app.js",
-  "/pwa/opfs.js",
   "/pwa/manifest.webmanifest",
   "/pwa/icons/icon.svg",
+  "/assets/theme.css",
 ];
 
 self.addEventListener("install", (event) => {
@@ -70,8 +70,9 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // App shell assets: network-first with cache fallback.
-  if (url.pathname.startsWith("/pwa/")) {
+  // App shell assets: network-first with cache fallback. The shell and her
+  // theme load offline from cache when the service is unreachable.
+  if (url.pathname.startsWith("/pwa/") || url.pathname.startsWith("/assets/")) {
     event.respondWith(
       fetch(req)
         .then((res) => {

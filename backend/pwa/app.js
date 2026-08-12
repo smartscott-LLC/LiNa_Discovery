@@ -19,6 +19,19 @@ const LinaApp = (() => {
 
   function userId() { return state.userId; }
 
+  // She must exist before a session can start — /lina/init is idempotent
+  // (returns the existing identity when present).
+  async function ensureUser() {
+    try {
+      const r = await api("/lina/init", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: state.userId, founding_context: "her face" }),
+      });
+      if (r.season) setSeason(r.season);
+    } catch (e) { /* offline — retried on next send */ }
+  }
+
   async function api(path, options) {
     const res = await fetch(path, options);
     if (!res.ok) {
@@ -58,21 +71,22 @@ const LinaApp = (() => {
     if (el) { el.textContent = state.season; }
   }
 
+  // The orb is her presence: visible when the window is tucked away, gone
+  // while she is open (the window has its own minimize). Always an overlay.
+  function setOrb(visible) {
+    $("#launcher").hidden = !visible;
+  }
+
   // ── floating window ───────────────────────────────────────────────────────
   function bindWindow() {
     const win = $("#chat-window");
     const launcher = $("#launcher");
 
     launcher.addEventListener("click", () => {
-      win.hidden = false;
-      win.classList.remove("maximized");
-      applyMaximized();
-      win.style.left = localStorage.getItem("lina.winLeft") || "";
-      win.style.bottom = "22px";
-      $("#chat-input").focus();
+      openWindow();
     });
 
-    $("#btn-min").addEventListener("click", () => { win.hidden = true; });
+    $("#btn-min").addEventListener("click", () => { win.hidden = true; setOrb(true); });
     $("#btn-max").addEventListener("click", () => {
       state.maximized = !state.maximized;
       localStorage.setItem("lina.maximized", state.maximized ? "1" : "0");
@@ -101,6 +115,17 @@ const LinaApp = (() => {
         drag = null;
       }
     });
+  }
+
+  function openWindow() {
+    const win = $("#chat-window");
+    win.hidden = false;
+    setOrb(false);
+    win.classList.remove("maximized");
+    applyMaximized();
+    win.style.left = localStorage.getItem("lina.winLeft") || "";
+    win.style.bottom = "22px";
+    $("#chat-input").focus();
   }
 
   function applyMaximized() {
@@ -349,7 +374,12 @@ const LinaApp = (() => {
       $("#notify-btn").addEventListener("click", () => {
         if ("Notification" in window) Notification.requestPermission();
       });
-    } catch (e) { /* offline */ }
+    } catch (e) {
+      const body = $("#settings-body");
+      if (body && !body.innerHTML) {
+        body.innerHTML = `<p class="sub">Her settings are unreachable right now — ${escapeHtml(e.message)}</p>`;
+      }
+    }
   }
 
   function notify(title, body) {
@@ -360,13 +390,15 @@ const LinaApp = (() => {
 
   // ── drawers ───────────────────────────────────────────────────────────────
   function openDrawer(el) {
+    clearTimeout(el._closeTimer);
     el.hidden = false;
     el.classList.remove("closing-right", "closing-left");
     $("#overlay").hidden = false;
   }
   function closeDrawer(el, side) {
     el.classList.add(side === "right" ? "closing-right" : "closing-left");
-    setTimeout(() => { el.hidden = true; }, 400);
+    clearTimeout(el._closeTimer);
+    el._closeTimer = setTimeout(() => { el.hidden = true; }, 380);
     $("#overlay").hidden = true;
   }
   function bindDrawers() {
@@ -441,6 +473,7 @@ const LinaApp = (() => {
   // ── boot ──────────────────────────────────────────────────────────────────
   function boot() {
     if (state.maximized) applyMaximized();
+    setOrb(true);
     bindWindow();
     bindDrawers();
     bindProposers();
@@ -450,6 +483,12 @@ const LinaApp = (() => {
     startTelemetryStream();
     setInterval(refreshStatus, 15000);
     setInterval(refreshPending, 5000);
+
+    // She must exist before sessions and settings can work.
+    ensureUser().then(() => {
+      refreshStatus();
+      refreshSettings();
+    });
 
     $("#chat-form").addEventListener("submit", (e) => {
       e.preventDefault();
@@ -465,8 +504,8 @@ const LinaApp = (() => {
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "l") {
         e.preventDefault();
         const win = $("#chat-window");
-        win.hidden = !win.hidden;
-        if (!win.hidden) { win.classList.remove("maximized"); state.maximized = false; applyMaximized(); $("#chat-input").focus(); }
+        if (win.hidden) openWindow();
+        else { win.hidden = true; setOrb(true); }
       }
       if (e.key === "Escape") {
         if (!$("#log-drawer").hidden) closeDrawer($("#log-drawer"), "right");
