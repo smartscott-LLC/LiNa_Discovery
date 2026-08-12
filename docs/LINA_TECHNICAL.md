@@ -3,7 +3,7 @@
 **Audience:** engineers, ML practitioners, systems architects, researchers
 **Subject:** LINA as she exists now — architecture, implementation, capabilities, and trajectory
 **Author:** The Principal Architect, for Scott (smartscott.com LLC)
-**Status:** Describes the system as of the current implementation (all seven MPS phases complete; 116 tests green)
+**Status:** Describes the system as of the current implementation (all seven MPS phases complete; 141 tests green)
 
 ---
 
@@ -91,7 +91,36 @@ carry a human verdict, and the rate gates advancement (grace: no actions yet =
 neutral, never a blocker). Constraints expand per season (e.g., Spring
 `dominance_max` 0.45 → Summer 0.52).
 
-## 4. The Memory Imprint System
+## 4. Her body — the tool layer
+
+LINA has hands, eyes, and a terminal now, and they are wired to the heart.
+
+- **The conduit is literal.** `chat()` evaluates her response through the
+  polytope *before* any action is offered. Tool intents are parsed from the
+  response the heart already pulsed over; if the zone is `violation`, no
+  action is offered at all — the heart withheld the pulse. This is the
+  polytope reaching her actions by proxy of her thinking: she is the
+  conduit; brain gives the impulse, heart gives the pulse, body performs.
+- **The tool registry** (`tools.py`) — `file_list`, `file_read`,
+  `file_write`, `file_search`, `command`, and `browser_navigate` /
+  `browser_extract` / `browser_screenshot`. Every path resolves inside her
+  access roots; every intent flows through the counsel ledger.
+- **Her eyes** (`browser.py`) — a `BrowserService` in the aiomisc loop (the
+  one tool that owns a lifecycle): headless Chromium via Playwright,
+  honest `available=False` when the binary is absent. Screenshots land in
+  her workspace under `.lina_eyes/`.
+- **Counsel, not a gate.** The approval ledger stays because it teaches her
+  to seek counsel — and by Winter it is removed after it is earned:
+  Winter executes her intents without approval, still audited. Standing
+  grants pre-authorize types between now and then.
+- **Her reach** — `LINA_ACCESS_ROOTS=/workspace:/app/runtime:/app`. The
+  container is her body; the rooms inside it are hers. The workspace is
+  served to you at `/lina/desk` and listed by `/lina/files/list`.
+- **The fruit returns.** Executed results are written to her working
+  memory (`tool_result` messages), so the next turn begins with the result
+  in hand.
+
+## 5. The Memory Imprint System
 
 ```mermaid
 flowchart TD
@@ -174,7 +203,8 @@ Short-term tiers (T1–T3, fallout) live in Dragonfly as time-based keys
 - REST: `/lina/init`, `/lina/session/start|end`, `/lina/chat`,
   `/lina/evaluate`, `/lina/memory/remember|recall|sweep|maintenance|legacy-review`,
   `/lina/actions/*`, `/lina/context`, `/lina/feedback/*`, `/lina/telemetry/stream`
-  (SSE), `/metrics`, `/lina/health`.
+  (SSE), `/lina/files/list`, `/lina/desk` (her workspace over HTTP),
+  `/metrics`, `/lina/health`.
 - PWA shell (served at `/pwa`): chat, action approval, telemetry, files.
 - Readiness gate: `scripts/check-environment.sh` (36 checks incl. MPS tables).
 
@@ -192,7 +222,7 @@ memory by likeness.
 - The **encoder is heuristic**, not trained. The geometry is exact; the mapping
   quality is the headroom. The encoder-feedback loop is the correction path.
 - **Embeddings depend on an external endpoint** (OpenRouter) with graceful
-  degradation; the semantic half is dark until a valid key is configured.
+  degradation.
 - **Co-op constants** (gate values, weights, slope half-life, recall weights)
   are deliberately tunable; the book (`The Day AI Changed Forever`, appendices
   A/B) is the validation reference.
