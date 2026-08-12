@@ -13,6 +13,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/lina/requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Her eyes — headless Chromium via Playwright. The base image is Debian
+# trixie, which Playwright's --with-deps does not know; the browser's
+# system libraries are installed explicitly instead, then the browser
+# binary itself. (Playwright ships linux-arm64 builds, so her eyes follow
+# her to the Snapdragon lab too.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
+    libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+    libgbm1 libasound2t64 libpango-1.0-0 libcairo2 libx11-6 libxcb1 libxext6 \
+    fonts-liberation fonts-unifont \
+    && rm -rf /var/lib/apt/lists/*
+RUN python -m playwright install chromium
+
 # Rust toolchain (minimal profile) — builds Triton, the Rust spoke that
 # attaches to LINA's shared-memory chambers (no PyO3, no maturin).
 ENV PATH="/root/.cargo/bin:${PATH}"

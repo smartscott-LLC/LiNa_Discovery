@@ -9,3 +9,4 @@ pydantic==2.13.4
 passagemath-standard==10.8.6
 passagemath-polyhedra==10.8.6
 passagemath-ppl==0.8.10.2
+playwright==1.49.1

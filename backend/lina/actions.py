@@ -37,8 +37,12 @@ COMMAND_TIMEOUT = float(os.getenv("LINA_COMMAND_TIMEOUT", "15"))
 #: Maximum characters of execution output kept on the action row.
 MAX_OUTPUT = 2000
 
-#: Action types that exist today.
-KNOWN_TYPES = {"file_read", "file_write", "command", "tool", "opfs_read", "opfs_write"}
+#: Action types that exist today. ``tool`` and the opfs records are audit
+#: carriers; the executable body lives in tools.py (the registry).
+KNOWN_TYPES = {
+    "file_read", "file_write", "file_list", "file_search",
+    "command", "browser", "tool", "opfs_read", "opfs_write",
+}
 
 
 class ActionError(Exception):
@@ -97,8 +101,23 @@ def _write_file(target: str, content: str) -> int:
         return fh.write(content)
 
 
-async def execute_action(row: dict[str, Any]) -> dict[str, Any]:
-    """Execute an approved action row. Returns {"ok", "output"} — never raises."""
+def grant_allows(standing_grants: dict[str, Any] | None, action_type: str) -> bool:
+    """Does a standing grant pre-authorize this action type? Grants are
+    opt-in per type; an unknown type is never granted."""
+    if not standing_grants:
+        return False
+    return bool(standing_grants.get(action_type))
+
+
+async def execute_action(
+    row: dict[str, Any],
+    browser: Any = None,
+) -> dict[str, Any]:
+    """Execute an approved action row. Returns {"ok", "output"} — never raises.
+
+    ``browser`` is the BrowserService (her eyes) when it is in the loop; the
+    browser action kinds need it, the rest never touch it.
+    """
     kind = row.get("action_type", "")
     payload = row.get("payload") or {}
     if isinstance(payload, str):
@@ -142,6 +161,10 @@ async def execute_action(row: dict[str, Any]) -> dict[str, Any]:
                 raise ActionError(f"command timed out after {COMMAND_TIMEOUT}s") from None
             text = (out or b"").decode(errors="replace")
             return {"ok": proc.returncode == 0, "output": text[:MAX_OUTPUT]}
+
+        if kind in ("file_list", "file_search", "browser"):
+            from tools import execute_action_kind  # lazy: tools imports actions
+            return await execute_action_kind(kind, payload, roots, browser=browser)
 
         if kind == "tool":
             return {
@@ -190,18 +213,20 @@ class ActionStore:
             raise ActionError(f"unknown action type: {action_type}")
         if not description.strip():
             raise ActionError("description required")
-        if action_type in ("file_read", "file_write"):
-            if not path:
-                raise ActionError("path required for file actions")
+        if action_type in ("file_read", "file_write", "file_list", "file_search"):
             # Validate at proposal time — a traversal path never enters the
             # ledger, let alone the pending queue. Check against the full
             # access-root set (workspace + LINA_ACCESS_ROOTS). (Execution
-            # re-validates anyway; this is the early gate.)
+            # re-validates anyway; this is the early gate.) List/search may
+            # omit the path and default to the workspace root.
             roots = [workspace] if workspace else []
             for root in configured_roots():
                 if root not in roots:
                     roots.append(root)
-            resolve_action_path(path, roots)
+            if action_type in ("file_read", "file_write") and not path:
+                raise ActionError("path required for file actions")
+            if path:
+                resolve_action_path(path, roots)
 
         action_id = str(uuid.uuid4())
         await self.db.execute(

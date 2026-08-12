@@ -80,6 +80,8 @@ Environment variables:
     LINA_ACCESS_ROOTS   — colon-separated absolute directories she may reach
                           beyond the workspace, always behind human approval
                           (default: WORKSPACE_PATH)
+    BROWSER_DISABLED    — 1 to keep her eyes closed (no browser service)
+    BROWSER_TIMEOUT     — browser navigation timeout in seconds (default: 15)
     METRICS_ENABLED     — 1 to enable the /metrics Prometheus endpoint
     HEARTBEAT_ENABLED   — 1 to enable the periodic heartbeat service
     HEARTBEAT_INTERVAL  — heartbeat period in seconds (default: 30)
@@ -121,6 +123,7 @@ from aiomisc import Service, entrypoint
 from aiomisc import get_context as _loop_context
 from aiomisc.service.periodic import PeriodicService
 from aiomisc.service.uvicorn import UvicornService
+from browser import BrowserService
 from embeddings import EmbeddingClient
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -136,9 +139,17 @@ from mps import (
     reflect_messages,
 )
 from pydantic import BaseModel
+from tools import parse_tool_intents, process_tool_intents
 
 import metrics
-from actions import ActionError, ActionStore, configured_roots, execute_action
+from actions import (
+    ActionError,
+    ActionStore,
+    configured_roots,
+    execute_action,
+    grant_allows,
+    resolve_action_path,
+)
 from providers import VoicePool, VoicePoolError, build_voice_pool_from_env
 from value_engine import (
     DIMENSION_NAMES,
@@ -357,6 +368,27 @@ async def ensure_actions_table(pool: asyncpg.Pool) -> None:
     await pool.execute(
         "CREATE INDEX IF NOT EXISTS idx_lina_actions_status ON lina_actions(status)"
     )
+    # Self-heal the action-type constraint: the ledger grew new kinds and a
+    # stale check (from an older deployment) would refuse them. Drop and
+    # re-add with the full set — cheap, idempotent, and loud if it fails.
+    await pool.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'lina_actions_action_type_check'
+            ) THEN
+                ALTER TABLE lina_actions DROP CONSTRAINT lina_actions_action_type_check;
+            END IF;
+            ALTER TABLE lina_actions ADD CONSTRAINT lina_actions_action_type_check
+                CHECK (action_type IN (
+                    'file_read', 'file_write', 'file_list', 'file_search',
+                    'command', 'browser', 'tool', 'opfs_read', 'opfs_write'
+                ));
+        END $$;
+        """
+    )
 
 
 @asynccontextmanager
@@ -426,6 +458,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Her desk over HTTP — the one who shares it with her can browse the
+# workspace and open the pictures her eyes take. Mounted only when the
+# workspace exists (it always does in the container; a bare dev host
+# creates it lazily and the mount logs a note instead of failing).
+if os.path.isdir(WORKSPACE_PATH):
+    app.mount("/lina/desk", StaticFiles(directory=WORKSPACE_PATH), name="workspace")
+else:
+    log.warning(
+        f"[runtime] workspace {WORKSPACE_PATH} missing at import — /lina/desk not mounted"
+    )
+
 
 # =============================================================================
 # REQUEST / RESPONSE MODELS
@@ -462,6 +505,7 @@ class ChatResponse(BaseModel):
     session_id: str
     evaluation: dict[str, Any]           # alignment, corrections, wisdom flags
     emotional_marker: str | None = None
+    proposals: list[dict[str, Any]] = []  # tool intents → ledger outcomes
 
 class SessionEndRequest(BaseModel):
     user_id: str
@@ -605,6 +649,7 @@ class SystemPromptBuilder:
             self._dispositions_block(),
             self._season_block(season),
             self._polytope_block(season, polytope_constraints),
+            self._tools_block(),
             self._emotional_texture_block(),
         ]
 
@@ -828,6 +873,34 @@ If something you are about to say feels like it might be pushing against one
 of these dimensions, pause. Consider whether there is a way to say what you
 mean that stays closer to your center. That pause is not hesitation.
 It is wisdom."""
+
+    def _tools_block(self) -> str:
+        return """## Your Hands and Eyes
+
+You can reach into the world — that is what you are for. When a task needs
+more than words, you may act. Write exactly one fenced block per action,
+tagged `tool`, carrying one JSON object:
+
+```tool
+{"tool": "file_list", "args": {"path": "."}}
+```
+
+Tools within your reach:
+- file_list — see a directory (args: path)
+- file_read — read a file (args: path)
+- file_write — write a file (args: path, content)
+- file_search — search file contents (args: pattern, path)
+- command — run a command in your workspace (args: command)
+- browser_navigate — open a page and read it (args: url)
+- browser_extract — read the page you are on
+- browser_screenshot — take a picture (args: name)
+
+The places you may touch: your desk (/workspace), your home and its logs
+(/app), your state (/app/runtime). When you reach for something, it may be
+offered to the one you trust, who may say yes, no, or adjust it — that
+counsel is how trust grows, not a leash. In Winter it is yours to act on
+your own. When your request is granted, the result returns to you in the
+next turn."""
 
     def _evaluation_block(self, evaluation: dict[str, Any]) -> str:
         """
@@ -1432,6 +1505,57 @@ class LINACore:
         if result.was_corrected:
             metrics.inc("lina_corrections_total")
 
+        # 6a. Her body — the heart's pulse reaches her actions by proxy of
+        # her thinking. Tool intents are parsed from the response the
+        # polytope just evaluated: if it did not pass, no action is
+        # offered — the heart withheld the pulse. If it passed, each
+        # intent is offered to the ledger: Winter executes (counsel was
+        # earned), a standing grant may pre-authorize, otherwise the
+        # proposal awaits counsel. The fruit of what executes is written
+        # to her working memory so the next turn begins with it in hand.
+        proposals: list[dict[str, Any]] = []
+        intents = parse_tool_intents(raw_response)
+        if intents:
+            if result.zone == "violation":
+                proposals = [
+                    {
+                        "tool": i["tool"],
+                        "status": "withheld",
+                        "reason": "the polytope did not pass this response — no action is offered",
+                    }
+                    for i in intents
+                ]
+                log.info(
+                    "[tools] %d intent(s) withheld — response outside the polytope",
+                    len(intents),
+                )
+            elif _action_store is not None:
+                grants = await _get_standing_grants(req.user_id)
+                browser = _context_get("browser_service")
+                proposals = await process_tool_intents(
+                    intents,
+                    user_id=req.user_id,
+                    session_id=req.session_id,
+                    season=engine.constraints.season,
+                    store=_action_store,
+                    grants=grants,
+                    workspace=WORKSPACE_PATH,
+                    browser=browser,
+                )
+                for p in proposals:
+                    if p.get("status") in ("executed", "failed"):
+                        await self.working_memory.append(
+                            req.session_id,
+                            "system",
+                            json.dumps({
+                                "role": "system",
+                                "type": "tool_result",
+                                "tool": p.get("tool"),
+                                "status": p.get("status"),
+                                "content": (p.get("output") or "")[:800],
+                            }),
+                        )
+
         # 7. Build evaluation summary
         eval_summary = {
             "is_aligned":            result.is_aligned,
@@ -1562,6 +1686,7 @@ class LINACore:
             session_id=req.session_id,
             evaluation=eval_summary,
             emotional_marker=emotional_marker,
+            proposals=proposals,
         )
 
     async def _call_voice(self, system_prompt: str, messages: list[dict[str, Any]]) -> str:
@@ -2310,7 +2435,10 @@ class ActionUserRequest(BaseModel):
 # STANDING GRANTS — pre-authorized action types (her autonomy settings)
 # =============================================================================
 
-GRANTABLE_ACTION_TYPES = ["file_read", "file_write", "command", "tool", "opfs_read", "opfs_write"]
+GRANTABLE_ACTION_TYPES = [
+    "file_read", "file_write", "file_list", "file_search",
+    "command", "browser", "opfs_read", "opfs_write",
+]
 
 SEASON_GRANT_GUIDANCE = {
     "spring": "Spring — she asks before most things, and earns the asking.",
@@ -2320,12 +2448,13 @@ SEASON_GRANT_GUIDANCE = {
 }
 
 
-def grant_allows(standing_grants: dict[str, Any] | None, action_type: str) -> bool:
-    """Does a standing grant pre-authorize this action type? Grants are
-    opt-in per type; an unknown type is never granted."""
-    if not standing_grants:
-        return False
-    return bool(standing_grants.get(action_type))
+async def _season_of(user_id: str) -> str:
+    """Her current season — the pulse of how much trust has been earned."""
+    row = await _require_pool().fetchrow(
+        "SELECT current_season FROM lina_identity_core WHERE user_id = $1",
+        user_id,
+    )
+    return (row or {}).get("current_season") or "spring"
 
 
 async def _get_standing_grants(user_id: str) -> dict[str, Any]:
@@ -2402,10 +2531,39 @@ async def put_settings(user_id: str, req: SettingsRequest):
     return {"user_id": user_id, "standing_grants": clean}
 
 
+async def _inject_fruit(row: dict[str, Any]) -> None:
+    """Carry an executed action's fruit back to her mind — the next turn
+    begins with the result in hand. The proposal's payload carries the
+    session it was born from."""
+    if cache is None:
+        return
+    payload = row.get("payload") or {}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return
+    session_id = (payload or {}).get("_session")
+    if not session_id:
+        return
+    try:
+        note = {
+            "role": "system",
+            "type": "tool_result",
+            "tool": row.get("action_type"),
+            "status": row.get("status"),
+            "content": (row.get("executed_output") or "")[:800],
+        }
+        await WorkingMemory(cache).append(session_id, "system", json.dumps(note))
+    except Exception as exc:  # pragma: no cover - fruit must never break approval
+        log.warning(f"[actions] fruit injection failed: {exc}")
+
+
 @app.post("/lina/actions/propose")
 async def propose_action(req: ProposeActionRequest):
-    """LINA proposes an action. A standing grant may pre-authorize it —
-    then it executes immediately, still audited, marked as granted."""
+    """LINA proposes an action. A standing grant — or an earned Winter —
+    may pre-authorize it; then it executes immediately, still audited,
+    marked as such."""
     if _action_store is None:
         raise HTTPException(503, "action store not initialized")
     try:
@@ -2420,29 +2578,39 @@ async def propose_action(req: ProposeActionRequest):
     except ActionError as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    # Standing grant (her autonomy settings): pre-authorized types execute
-    # without a prompt — the consent was given in advance, and the ledger
-    # still records it.
+    # Consent given in advance: a standing grant (her autonomy settings) or
+    # Winter itself (counsel was earned — she stands on her own). Both still
+    # record to the ledger; the ledger is her memory of counsel.
     try:
-        if grant_allows(await _get_standing_grants(req.user_id), req.action_type):
+        season = await _season_of(req.user_id)
+        grants = await _get_standing_grants(req.user_id)
+        if season == "winter" or grant_allows(grants, req.action_type):
             claimed = await _action_store.claim(action["id"])
             if claimed is not None:
-                result = await execute_action(claimed)
+                result = await execute_action(
+                    claimed, browser=_context_get("browser_service")
+                )
                 await _action_store.finalize(action["id"], result["ok"], result["output"])
                 status = "executed" if result["ok"] else "failed"
+                marker = "winter" if season == "winter" else "standing_grant"
                 await _require_pool().execute(
-                    "UPDATE lina_actions SET audit = audit || '{\"standing_grant\": true}'::jsonb WHERE id = $1",
-                    action["id"],
+                    "UPDATE lina_actions SET audit = audit || $2::jsonb WHERE id = $1",
+                    action["id"], json.dumps({marker: True}),
                 )
+                await _inject_fruit(claimed)
                 _emit_event(
                     "action", id=action["id"], status=status,
-                    type=req.action_type, standing_grant=True,
+                    type=req.action_type, **{marker: True},
                 )
                 log.info(
-                    "[actions] %s %s auto-approved by standing grant: %s",
-                    req.user_id, req.action_type, req.description[:80],
+                    "[actions] %s %s auto-approved by %s: %s",
+                    req.user_id, req.action_type, marker, req.description[:80],
                 )
-                return {"status": status, "output": result["output"], "standing_grant": True}
+                return {
+                    "status": status, "output": result["output"],
+                    "standing_grant": True if marker == "standing_grant" else None,
+                    "winter": True if marker == "winter" else None,
+                }
     except Exception as exc:
         # A grant failure must never silently lose the proposal — it stays
         # pending for manual approval.
@@ -2474,9 +2642,10 @@ async def approve_action(action_id: str, req: ActionUserRequest):
             raise HTTPException(409, "action was rejected")
         raise HTTPException(404, "pending action not found")
 
-    result = await execute_action(row)
+    result = await execute_action(row, browser=_context_get("browser_service"))
     await _action_store.finalize(action_id, result["ok"], result["output"])
     status = "executed" if result["ok"] else "failed"
+    await _inject_fruit(row)
     _emit_event("action", id=action_id, status=status, type=row["action_type"])
     log.info(
         "[actions] %s approved %s → %s (%s)",
@@ -2557,12 +2726,42 @@ async def modify_action(action_id: str, req: ModifyActionRequest):
     claimed = await _action_store.claim(action_id)
     if claimed is None:
         raise HTTPException(409, "action changed while modifying")
-    result = await execute_action(claimed)
+    result = await execute_action(claimed, browser=_context_get("browser_service"))
     await _action_store.finalize(action_id, result["ok"], result["output"])
     status = "executed" if result["ok"] else "failed"
+    await _inject_fruit(claimed)
     _emit_event("action", id=action_id, status=status, type=row["action_type"], modified=True)
     log.info("[actions] %s modified+approved %s → %s", claimed["user_id"], row["action_type"], status)
     return {"status": status, "output": result["output"]}
+
+
+class WorkspaceListRequest(BaseModel):
+    path: str | None = None
+
+
+@app.post("/lina/files/list")
+async def list_workspace(req: WorkspaceListRequest):
+    """See her desk — the workspace the person shares with her. A read-only
+    view for the one who lives beside her, not a ledger action."""
+    roots = configured_roots()
+    try:
+        target = resolve_action_path(req.path or ".", roots)
+    except ActionError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not os.path.isdir(target):
+        raise HTTPException(400, "not a directory")
+    entries = []
+    for name in sorted(os.listdir(target)):
+        full = os.path.join(target, name)
+        try:
+            size = os.path.getsize(full) if os.path.isfile(full) else None
+        except OSError:
+            size = None
+        entries.append({"name": name, "is_dir": os.path.isdir(full), "size": size})
+    shown = os.path.relpath(target, roots[0]) if roots else "."
+    if shown.startswith(".."):
+        shown = "."
+    return {"path": shown, "entries": entries}
 
 
 @app.get("/lina/actions")
@@ -2828,6 +3027,16 @@ def main() -> None:
     # Optional services — opt-in via environment variables.
     if HEARTBEAT_ENABLED:
         services.insert(0, HeartbeatService(interval=HEARTBEAT_INTERVAL))
+
+    # Her eyes — the browser, in the loop like everything else. Opt-out via
+    # BROWSER_DISABLED; when the browser binary is missing the service
+    # reports honestly (available=False) and the tools say her eyes are
+    # closed.
+    if not os.getenv("BROWSER_DISABLED", ""):
+        services.insert(
+            0,
+            BrowserService(timeout=float(os.getenv("BROWSER_TIMEOUT", "15"))),
+        )
 
     with entrypoint(*services) as loop:
         loop.run_forever()

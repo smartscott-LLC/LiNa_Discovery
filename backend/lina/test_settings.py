@@ -26,7 +26,12 @@ class TestGrantAllows:
         assert grant_allows(grants, "totally_unknown") is False
 
     def test_grantable_types_are_the_ledger_types(self):
+        # Every grantable kind is a real ledger type — the old "tool"
+        # placeholder is gone; the concrete hands and eyes replaced it.
         assert "file_read" in GRANTABLE_ACTION_TYPES
         assert "file_write" in GRANTABLE_ACTION_TYPES
+        assert "file_list" in GRANTABLE_ACTION_TYPES
+        assert "file_search" in GRANTABLE_ACTION_TYPES
         assert "command" in GRANTABLE_ACTION_TYPES
-        assert "tool" in GRANTABLE_ACTION_TYPES
+        assert "browser" in GRANTABLE_ACTION_TYPES
+        assert "tool" not in GRANTABLE_ACTION_TYPES

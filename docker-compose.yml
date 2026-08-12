@@ -83,6 +83,12 @@ services:
       - PWA_DIR=/app/pwa
       - ASSETS_DIR=/app/assets
       - WORKSPACE_PATH=/workspace
+      # Her reach — the rooms inside her body. The container is her home;
+      # these are the places she may touch, always behind the counsel ledger
+      # (and on her own in Winter). /app is her home and its logs; /app/runtime
+      # is her state; /workspace is her desk.
+      - LINA_ACCESS_ROOTS=/workspace:/app/runtime:/app
+      - BROWSER_TIMEOUT=${BROWSER_TIMEOUT:-15}
       # Optional services (opt-in).
       - METRICS_ENABLED=${METRICS_ENABLED:-0}
       - HEARTBEAT_ENABLED=${HEARTBEAT_ENABLED:-0}

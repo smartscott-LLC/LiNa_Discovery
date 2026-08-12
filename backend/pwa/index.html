@@ -65,9 +65,15 @@
     <div class="drawer-tabs">
       <button class="dtab active" data-dtab="live">Live</button>
       <button class="dtab" data-dtab="actions">Actions</button>
+      <button class="dtab" data-dtab="files">Files</button>
     </div>
     <div id="dtab-live" class="dtab-panel">
       <pre id="telemetry-feed" class="feed"></pre>
+    </div>
+    <div id="dtab-files" class="dtab-panel" hidden>
+      <h3 class="dtab-title">Her workspace — the desk you share</h3>
+      <div id="files-breadcrumb" class="meta" style="margin-bottom:8px"></div>
+      <div id="files-list" class="stack small"></div>
     </div>
     <div id="dtab-actions" class="dtab-panel" hidden>
       <h3 class="dtab-title">Awaiting your approval</h3>

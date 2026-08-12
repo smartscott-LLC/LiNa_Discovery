@@ -273,13 +273,52 @@ async def reflect_messages(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1500,
         )
-        raw = response.strip()
+        raw = (response or "").strip()
+        if not raw:
+            log.warning(
+                f"[mps] reflection voice returned an empty report "
+                f"(session {session_id}) — nothing formed"
+            )
+            return []
         if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, list) else []
+            # Fenced report: the language tag (json/tool) rides the opening
+            # fence, the JSON body sits inside, the closing fence follows.
+            parts = raw.split("```")
+            body = ""
+            for i, part in enumerate(parts):
+                if part.strip().startswith(("json", "tool")) and i + 1 < len(parts):
+                    body = parts[i + 1]
+                    break
+            if not body and len(parts) >= 2:
+                body = parts[-2]
+            raw = body.strip()
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            # The voice wrapped the array in prose — the JSON is still
+            # there. Read the first array to its last bracket; if there is
+            # none, fail honestly with the report's opening words.
+            start, end = raw.find("["), raw.rfind("]")
+            if start == -1 or end <= start:
+                log.warning(
+                    f"[mps] reflection report for session {session_id} "
+                    f"was not JSON: {raw[:200]!r}"
+                )
+                return []
+            try:
+                parsed = json.loads(raw[start : end + 1])
+            except json.JSONDecodeError:
+                log.warning(
+                    f"[mps] reflection report for session {session_id} "
+                    f"was not JSON: {raw[:200]!r}"
+                )
+                return []
+        if not isinstance(parsed, list):
+            log.warning(
+                f"[mps] reflection report for session {session_id} was not a list"
+            )
+            return []
+        return parsed
     except Exception as exc:
         log.warning(f"Reflection failed for session {session_id}: {exc}")
         return []

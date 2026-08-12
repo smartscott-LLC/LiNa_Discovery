@@ -144,6 +144,26 @@ else
     warn "cannot verify MPS tables (docker or .env db config missing)"
 fi
 
+# ── 10. Her body — the tool layer ─────────────────────────────────────────────
+echo
+echo "── Her body — the tool layer ──"
+if [ -d "$ROOT/backend/lina" ]; then
+    if "$ROOT/.venv/bin/python" -c "import sys; sys.path.insert(0, '$ROOT/backend/lina'); import tools, browser, actions; assert 'browser' in actions.KNOWN_TYPES and 'file_list' in actions.KNOWN_TYPES" 2>/dev/null; then
+        ok "tool registry imports; ledger kinds include file_list/file_search/browser"
+    else
+        fail "tool layer does not import cleanly"
+    fi
+else
+    warn "backend/lina missing — cannot verify the tool layer"
+fi
+if command -v docker >/dev/null 2>&1 && [ -n "$pg_user" ] && [ -n "$pg_db" ]; then
+    cdef=$(docker exec collabsmart-postgres psql -U "$pg_user" -d "$pg_db" -tAc "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='lina_actions_action_type_check';" 2>/dev/null)
+    case "$cdef" in
+        *browser*|*file_list*) ok "ledger accepts the full action-kind set" ;;
+        *) warn "ledger constraint may reject new kinds — restart lina to self-heal" ;;
+    esac
+fi
+
 echo
 echo "──────────────────────────────────────────────────────────────"
 echo "Result: $PASS ok, $WARN warnings, $FAIL failures"

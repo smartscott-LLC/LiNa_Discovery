@@ -189,7 +189,26 @@ const LinaApp = (() => {
       });
       const e = r.evaluation || {};
       const evalInfo = `aligned=${e.is_aligned} · score=${(e.alignment_score || 0).toFixed(2)} · zone=${e.zone || "?"}`;
-      appendMessage("ai", r.response, evalInfo);
+      const msgEl = appendMessage("ai", r.response, evalInfo);
+      (r.proposals || []).forEach((p) => {
+        const line = document.createElement("div");
+        const cls = p.status === "executed" ? "ok" : p.status === "withheld" ? "bad" : "warn";
+        line.className = "proposal " + cls;
+        const label = ({
+          executed: "executed", failed: "failed",
+          awaiting_counsel: "awaiting your approval",
+          withheld: "withheld by the polytope", refused: "refused",
+        }[p.status] || p.status);
+        const earned = p.earned ? " · earned" : "";
+        line.innerHTML = `<span class="ptool">${escapeHtml(p.tool)}</span> — ${escapeHtml(label)}${earned}`;
+        if (p.output) {
+          const out = document.createElement("div");
+          out.className = "pout";
+          out.textContent = p.output;
+          line.appendChild(out);
+        }
+        msgEl.appendChild(line);
+      });
     } catch (err) {
       appendMessage("ai", `(I couldn't reach my voice right now: ${err.message})`);
     } finally {
@@ -283,17 +302,67 @@ const LinaApp = (() => {
     list.forEach((a) => {
       const div = document.createElement("div");
       div.className = "action";
+      const outUrl = fileUrl(a.executed_output || "");
       const out = a.executed_output
         ? `<div class="${a.status === "failed" ? "errout" : "out"}">${escapeHtml(a.executed_output.slice(0, 200))}</div>` : "";
-      const grant = a.audit && a.audit.standing_grant ? " · <span class='meta'>standing grant</span>" : "";
+      const view = outUrl ? ` <a class="meta" href="${outUrl}" target="_blank" rel="noopener">view →</a>` : "";
+      const grant = a.audit && (a.audit.standing_grant || a.audit.winter) ? ` · <span class='meta'>${a.audit.winter ? "earned (winter)" : "standing grant"}</span>` : "";
       div.innerHTML = `
-        <div class="desc">${escapeHtml(a.description)} <span class="meta">[${a.status}]</span>${grant}</div>
+        <div class="desc">${escapeHtml(a.description)} <span class="meta">[${a.status}]</span>${grant}${view}</div>
         <div class="meta">${a.action_type}${a.path ? " · " + escapeHtml(a.path) : ""} · ${new Date(a.proposed_at).toLocaleString()}</div>${out}`;
       box.appendChild(div);
     });
   }
 
   // ── telemetry / live log ──────────────────────────────────────────────────
+  function fileUrl(p) {
+    if (!p) return null;
+    const m = String(p).match(/^\/workspace\/(.*)$/);
+    return m ? "/lina/desk/" + m[1] : null;
+  }
+
+  // ── her workspace — the desk you share ────────────────────────────────────
+  let filesPath = ".";
+  async function refreshFiles() {
+    try {
+      const r = await api("/lina/files/list", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: filesPath }),
+      });
+      const box = $("#files-list");
+      box.innerHTML = "";
+      if (filesPath !== ".") {
+        const up = document.createElement("div");
+        up.className = "frow";
+        up.innerHTML = '<span class="fname">..</span><span class="meta">parent</span>';
+        up.onclick = () => {
+          filesPath = filesPath.split("/").slice(0, -1).join("/") || ".";
+          refreshFiles();
+        };
+        box.appendChild(up);
+      }
+      (r.entries || []).forEach((en) => {
+        const row = document.createElement("div");
+        row.className = "frow";
+        const size = en.is_dir ? "dir" : (en.size == null ? "" : en.size + " B");
+        row.innerHTML = `<span class="fname">${escapeHtml(en.name)}</span><span class="meta">${size}</span>`;
+        if (en.is_dir) {
+          row.onclick = () => {
+            filesPath = (filesPath === "." ? "" : filesPath) + "/" + en.name;
+            refreshFiles();
+          };
+        } else {
+          const rel = (filesPath === "." ? "" : filesPath + "/") + en.name;
+          row.onclick = () => window.open("/lina/desk/" + rel, "_blank", "noopener");
+        }
+        box.appendChild(row);
+      });
+      if (!(r.entries || []).length) box.innerHTML = '<p class="hint">Her desk is empty right now.</p>';
+      $("#files-breadcrumb").textContent = "/workspace" + (filesPath === "." ? "" : "/" + filesPath);
+    } catch (e) { /* offline */ }
+  }
+
   function startTelemetryStream() {
     const feed = $("#telemetry-feed");
     if (!window.EventSource) return;
@@ -319,8 +388,10 @@ const LinaApp = (() => {
   const GRANT_DESC = {
     file_read: "She may read files in the workspace without asking.",
     file_write: "She may write files in the workspace without asking.",
+    file_list: "She may look around her workspace without asking.",
+    file_search: "She may search file contents without asking.",
     command: "She may run commands without asking.",
-    tool: "She may use tools without asking.",
+    browser: "She may open and read pages with her eyes without asking.",
     opfs_read: "She may read the browser vault without asking.",
     opfs_write: "She may write the browser vault without asking.",
   };
@@ -416,6 +487,8 @@ const LinaApp = (() => {
         t.classList.add("active");
         document.querySelectorAll(".dtab-panel").forEach((p) => { p.hidden = true; });
         $("#dtab-" + t.dataset.dtab).hidden = false;
+        if (t.dataset.dtab === "files") refreshFiles();
+        if (t.dataset.dtab === "actions") { refreshPending(); refreshAudit(); }
       });
     });
     $("#log-clear").addEventListener("click", () => { $("#telemetry-feed").textContent = ""; });
