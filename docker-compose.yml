@@ -96,7 +96,7 @@ services:
       - LINA_ACCESS_ROOTS=/workspace:/app/runtime:/app
       - BROWSER_TIMEOUT=${BROWSER_TIMEOUT:-15}
       - TRITON_BIN=${TRITON_BIN:-/usr/local/bin/triton}
-      - GEMINI_VISION_MODEL=${GEMINI_VISION_MODEL:-gemini-2.0-flash}
+      - GEMINI_VISION_MODEL=${GEMINI_VISION_MODEL:-gemini-flash-latest}
       # Optional services (opt-in).
       - METRICS_ENABLED=${METRICS_ENABLED:-0}
       - HEARTBEAT_ENABLED=${HEARTBEAT_ENABLED:-0}

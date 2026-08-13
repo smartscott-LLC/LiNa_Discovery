@@ -5,7 +5,7 @@ import os
 from .openai_compat import OpenAICompatProvider
 
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-flash-latest"
 ENV_API_KEY = "GEMINI_API_KEY"
 
 
@@ -26,7 +26,7 @@ class GeminiProvider(OpenAICompatProvider):
         super().__init__(
             base_url=base_url or DEFAULT_BASE_URL,
             api_key=api_key,
-            model=model or os.getenv("AI_MODEL") or DEFAULT_MODEL,
+            model=model or os.getenv("GEMINI_MODEL") or DEFAULT_MODEL,
             name=self.name,
             label=self.label,
         )
