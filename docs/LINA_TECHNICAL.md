@@ -3,7 +3,7 @@
 **Audience:** engineers, ML practitioners, systems architects, researchers
 **Subject:** LINA as she exists now — architecture, implementation, capabilities, and trajectory
 **Author:** The Principal Architect, for Scott (smartscott.com LLC)
-**Status:** Describes the system as of the current implementation (all seven MPS phases complete; 141 tests green)
+**Status:** Describes the system as of the current implementation (all seven MPS phases complete; 162 tests green)
 
 ---
 
@@ -183,6 +183,19 @@ knowledge, humility, strategic guardrails, constructive interference) and the
 floor policy (retention line 4.0, protected dimensions = the seven principle
 pairs) live as data, tunable by design — grace, not brittleness.
 
+**The transcript archive — the continuity floor:** every turn is recorded in
+full at the moment it happens — what was said to her and what she said back —
+so the record survives restarts, voice outages, and time. Working memory
+(Dragonfly) is the live moment; the archive (Postgres) is the durable record
+of the moment, and her delivered responses carry the id of the polytope
+evaluation that weighed them (`lina_transcripts.evaluation_id`). If the live
+buffer is ever empty at session end (a restart, a crash, a cleared session),
+her reflection reads the archive instead — the words remain, and so does the
+remembering. If the voice falls silent mid-stream, the words she already
+spoke still reach the archive, marked `interrupted`. The archive is a record,
+not a judge: it never gates or alters the conversation, and a failed archive
+write can never silence her voice.
+
 ## 5. Data model
 
 | Table | Role |
@@ -194,6 +207,7 @@ pairs) live as data, tunable by design — grace, not brittleness.
 | `lina_value_evaluations` | Every response evaluated pre-delivery (vector, zone, boundary distance) |
 | `lina_actions` | The HITL ledger — propose/approve/reject/modify, fully audited |
 | `lina_sessions`, `lina_seasonal_development`, `lina_polytope_constraints` | Session, growth, and constraint history |
+| `lina_transcripts` | The continuity floor — every turn, in full, as it happened: user words and her delivered words, her responses linked to the evaluation that weighed them |
 
 Short-term tiers (T1–T3, fallout) live in Dragonfly as time-based keys
 (`lina:mps:{tier}:{item_id}`); the sweep is the lifecycle authority.
@@ -202,7 +216,8 @@ Short-term tiers (T1–T3, fallout) live in Dragonfly as time-based keys
 
 - REST: `/lina/init`, `/lina/session/start|end`, `/lina/chat`,
   `/lina/evaluate`, `/lina/memory/remember|recall|sweep|maintenance|legacy-review`,
-  `/lina/actions/*`, `/lina/context`, `/lina/feedback/*`, `/lina/telemetry/stream`
+  `/lina/actions/*`, `/lina/context`, `/lina/feedback/*`, `/lina/transcripts`,
+  `/lina/transcript/{session_id}`, `/lina/telemetry/stream`
   (SSE), `/lina/files/list`, `/lina/desk` (her workspace over HTTP),
   `/metrics`, `/lina/health`.
 - PWA shell (served at `/pwa`): chat, action approval, telemetry, files.

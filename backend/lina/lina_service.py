@@ -406,6 +406,35 @@ async def ensure_actions_table(pool: asyncpg.Pool) -> None:
     )
 
 
+async def ensure_transcript_table(pool: asyncpg.Pool) -> None:
+    """Ensure the transcript archive exists for live deployments.
+
+    The full-text record of what was said — the continuity floor. Fresh
+    installs create it from ``backend/db/lina_schema.sql``; live databases
+    get it here, idempotently, alongside the other ensure_* migrations.
+    """
+    await pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS lina_transcripts (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id         VARCHAR(255) NOT NULL REFERENCES lina_identity_core(user_id) ON DELETE CASCADE,
+            session_id      VARCHAR(255) NOT NULL,
+            role            VARCHAR(16) NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+            content         TEXT NOT NULL,
+            msg_type        VARCHAR(32),
+            evaluation_id   UUID,
+            created_at      TIMESTAMPTZ DEFAULT NOW()
+        )
+        """
+    )
+    await pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lina_transcripts_user ON lina_transcripts(user_id)"
+    )
+    await pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lina_transcripts_session ON lina_transcripts(session_id, created_at)"
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global db_pool, cache, _action_store
@@ -442,6 +471,7 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("Database pool was not initialized.")
     await ensure_phase_b_schema(db_pool)
     await ensure_actions_table(db_pool)
+    await ensure_transcript_table(db_pool)
     _action_store = ActionStore(db_pool)
 
     cache     = aioredis.from_url(REDIS_URL, decode_responses=True)
@@ -1004,6 +1034,52 @@ class WorkingMemory:
         return [json.loads(r) for r in raw if r]
 
 
+class TranscriptArchive:
+    """The full-text record of what was said — her continuity floor.
+
+    Working memory (Dragonfly) is the live moment; this is the durable
+    record of the moment. Every turn lands here as it happens, in full, so
+    the archive survives restarts, voice outages, and time. Only the
+    conversation itself is archived — her delivered responses carry the id
+    of the polytope evaluation that weighed them, so the record and the
+    alignment of the record stay connected.
+    """
+
+    def __init__(self, db: asyncpg.Pool):
+        self.db = db
+
+    async def record(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        role: str,
+        content: str,
+        msg_type: str | None = None,
+        evaluation_id: str | None = None,
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO lina_transcripts (user_id, session_id, role, content, msg_type, evaluation_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+            user_id, session_id, role, content, msg_type, evaluation_id,
+        )
+
+    async def session(self, user_id: str, session_id: str) -> list[dict[str, Any]]:
+        """The record of one meeting, oldest first — what was said, in order."""
+        rows = await self.db.fetch(
+            """
+            SELECT role, content, msg_type, evaluation_id, created_at
+            FROM lina_transcripts
+            WHERE user_id = $1 AND session_id = $2
+            ORDER BY created_at, id
+            """,
+            user_id, session_id,
+        )
+        return [dict(r) for r in rows]
+
+
 # =============================================================================
 # MEMORY FORMATION
 # After a session ends, LINA decides what to remember.
@@ -1157,6 +1233,7 @@ class LINACore:
         self.context_builder = ContextBuilder(db)
         self.prompt_builder  = SystemPromptBuilder()
         self.working_memory  = WorkingMemory(cache_client)
+        self.archive         = TranscriptArchive(db)
         self.memory_formation = MemoryFormation(
             db, cache_client, voice, engine_factory=self.get_engine
         )
@@ -1475,6 +1552,7 @@ class LINACore:
 
         # 4. Store user message
         await self.working_memory.append(req.session_id, "user", req.message)
+        await self._archive_turn(req=req, role="user", content=req.message)
 
         # 4a. Dispatch the outgoing request through the TX chamber (Chamber A).
         # Triton can observe/relay the request to the network substrate; this
@@ -1632,8 +1710,9 @@ class LINACore:
                 }),
             )
 
-        # 8. Log evaluation to database
-        await self.db.execute(
+        # 8. Log evaluation to database — and keep the row id so the archive
+        # can tie her words to the polytope evaluation that weighed them.
+        eval_id = await self.db.fetchval(
             """
             INSERT INTO lina_value_evaluations (
                 user_id, session_id, response_summary, decision_vector,
@@ -1643,6 +1722,7 @@ class LINACore:
                 humility_added, validation_suggested, wisdom_adjustments,
                 zone, boundary_distance, season, variance_margin_used
             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+            RETURNING id
             """,
             req.user_id, req.session_id, raw_response[:200],
             result.decision_vector.tolist(),
@@ -1656,6 +1736,11 @@ class LINACore:
 
         # 9. Store LINA's response in working memory
         await self.working_memory.append(req.session_id, "assistant", raw_response)
+        # 9b. Archive the delivered words, tied to the evaluation that weighed them
+        await self._archive_turn(
+            req=req, role="assistant", content=raw_response,
+            evaluation_id=str(eval_id) if eval_id else None,
+        )
 
         # 9a. Auto-feedback: if the response was corrected, teach the encoder.
         # In Spring, corrections are flagged but require user confirmation.
@@ -1759,6 +1844,36 @@ class LINACore:
                 parts.append(chunk)
                 await on_token(chunk)
         return "".join(parts)
+
+    async def _archive_turn(
+        self,
+        *,
+        req: ChatRequest,
+        role: str,
+        content: str,
+        msg_type: str | None = None,
+        evaluation_id: str | None = None,
+    ) -> None:
+        """Best-effort archive write — the record never silences the voice.
+
+        The conversation is the primary flow; the archive is the record of
+        it. If the archive cannot be written (database hiccup), the turn
+        still happens — we log what we could not keep.
+        """
+        try:
+            await self.archive.record(
+                user_id=req.user_id,
+                session_id=req.session_id,
+                role=role,
+                content=content,
+                msg_type=msg_type,
+                evaluation_id=evaluation_id,
+            )
+        except Exception as exc:
+            log.warning(
+                f"[archive] could not record {role} turn "
+                f"(session {req.session_id}): {exc}"
+            )
 
     async def _get_session_number(self, user_id: str, session_id: str) -> int:
         row = await self.db.fetchrow(
@@ -2038,6 +2153,42 @@ async def chat(req: ChatRequest):
     return await core.chat(req)
 
 
+@app.get("/lina/transcript/{session_id}")
+async def transcript(session_id: str, user_id: str):
+    """The full-text record of one meeting, oldest first.
+
+    Every turn — what was said to her and what she said back — with her
+    responses linked to the polytope evaluation that weighed them.
+    """
+    core = get_core()
+    rows = await core.archive.session(user_id, session_id)
+    if not rows:
+        raise HTTPException(404, "no transcript for this session")
+    return {"session_id": session_id, "messages": rows}
+
+
+@app.get("/lina/transcripts")
+async def transcripts(user_id: str, limit: int = 20):
+    """The archive index — recent sessions and how much was said in each."""
+    core = get_core()
+    rows = await core.db.fetch(
+        """
+        SELECT session_id,
+               COUNT(*) FILTER (WHERE role = 'user')      AS user_turns,
+               COUNT(*) FILTER (WHERE role = 'assistant') AS lina_turns,
+               MIN(created_at) AS started_at,
+               MAX(created_at) AS last_at
+        FROM lina_transcripts
+        WHERE user_id = $1
+        GROUP BY session_id
+        ORDER BY last_at DESC
+        LIMIT $2
+        """,
+        user_id, limit,
+    )
+    return {"user_id": user_id, "sessions": [dict(r) for r in rows]}
+
+
 class SpeakRequest(BaseModel):
     text: str
     voice: str | None = None
@@ -2089,15 +2240,35 @@ async def chat_stream(req: ChatRequest, request: Request):
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
     core = get_core()
 
-    async def emit_token(tok: str) -> None:
-        """Her words land on the queue the moment they arrive."""
-        queue.put_nowait(("token", tok))
-
     async def run_chat() -> None:
+        spoken: list[str] = []
+
+        async def emit_token(tok: str) -> None:
+            """Her words land on the queue the moment they arrive."""
+            spoken.append(tok)
+            queue.put_nowait(("token", tok))
+
         try:
             resp = await core._chat(req, emit_token)
             await queue.put_nowait(("done", resp))
         except Exception as exc:  # noqa: BLE001 - surfaced to the client as an event
+            if spoken:
+                # The voice fell silent mid-turn. What she already said is
+                # real — keep it in the archive, marked as interrupted, so
+                # the record shows the truth of what took place.
+                try:
+                    await core.archive.record(
+                        user_id=req.user_id,
+                        session_id=req.session_id,
+                        role="assistant",
+                        content="".join(spoken),
+                        msg_type="interrupted",
+                    )
+                except Exception as exc2:  # noqa: BLE001
+                    log.warning(
+                        f"[archive] could not record interrupted turn "
+                        f"(session {req.session_id}): {exc2}"
+                    )
             await queue.put_nowait(("error", str(exc)))
 
     task = asyncio.create_task(run_chat())
@@ -2121,6 +2292,30 @@ async def chat_stream(req: ChatRequest, request: Request):
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
+async def _session_messages_for_reflection(core: LINACore, req: SessionEndRequest) -> list[dict[str, Any]]:
+    """The conversation she reflects over.
+
+    The live buffer when it is intact; the archive when it is not — a
+    restart, a crash, a cleared session. The words remain either way, and
+    so does the remembering: no session is lost to a gap.
+    """
+    messages = await core.working_memory.get_messages(req.session_id)
+    if len(messages) >= 2:
+        return messages
+    archived = await core.archive.session(req.user_id, req.session_id)
+    rebuilt = [
+        {"role": r["role"], "content": r["content"]}
+        for r in archived
+        if r["role"] in ("user", "assistant")
+    ]
+    if rebuilt:
+        log.info(
+            f"[archive] session {req.session_id}: live buffer empty — "
+            f"reflecting from {len(rebuilt)} archived turns"
+        )
+    return rebuilt
+
+
 @app.post("/lina/session/end", response_model=SessionEndResponse)
 async def end_session(req: SessionEndRequest):
     """
@@ -2129,7 +2324,7 @@ async def end_session(req: SessionEndRequest):
     """
     core = get_core()
 
-    messages = await core.working_memory.get_messages(req.session_id)
+    messages = await _session_messages_for_reflection(core, req)
     identity = await _require_pool().fetchrow(
         "SELECT current_season, sessions_completed FROM lina_identity_core WHERE user_id = $1",
         req.user_id,

@@ -809,8 +809,37 @@ CREATE INDEX IF NOT EXISTS idx_adaptations_user ON lina_adaptations(user_id);
 
 
 -- =============================================================================
+-- TABLE 14: LINA_TRANSCRIPTS
+-- The full-text record of what was said — her continuity floor.
+-- Working memory (Dragonfly) is the live moment; this is the durable record
+-- of the moment. Every turn lands here as it happens, in full, so the archive
+-- survives restarts, voice outages, and time. Only the conversation itself is
+-- archived — user turns and her delivered responses; internal system state
+-- (tool results, evaluations, foresight) stays in working memory where it
+-- belongs.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS lina_transcripts (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         VARCHAR(255) NOT NULL REFERENCES lina_identity_core(user_id) ON DELETE CASCADE,
+    session_id      VARCHAR(255) NOT NULL,
+
+    role            VARCHAR(16) NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+    content         TEXT NOT NULL,
+
+    msg_type        VARCHAR(32),            -- interrupted | tool_result | evaluation | …
+    evaluation_id   UUID,                   -- her response's polytope evaluation, when one exists
+
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_lina_transcripts_user ON lina_transcripts(user_id);
+CREATE INDEX IF NOT EXISTS idx_lina_transcripts_session ON lina_transcripts(session_id, created_at);
+
+
+-- =============================================================================
 -- END OF LINA SCHEMA
 --
--- Ten tables. One entity. A shape that earns trust.
+-- Fourteen tables. One entity. A shape that earns trust.
 -- From here: the values layer. Then the words. Then the remembering.
 -- =============================================================================
