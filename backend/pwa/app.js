@@ -334,6 +334,16 @@ const LinaApp = (() => {
     const btn = wrap.querySelector(".speak-btn");
     if (!btn) return;
     btn.textContent = "…";
+    // The TTS round-trip takes seconds, and the browser expires the click's
+    // user activation long before the audio arrives — a play() issued after
+    // the await would be refused by the autoplay policy. Unlock the element
+    // inside the gesture itself: a muted play() is always allowed, and it
+    // marks the element as user-activated. When the real words arrive we
+    // unmute and sound her voice.
+    const audio = new Audio();
+    audio.muted = true;
+    const unlock = audio.play().catch(() => {});
+    let url = null;
     try {
       const r = await fetch("/lina/speech/speak", {
         method: "POST",
@@ -342,13 +352,17 @@ const LinaApp = (() => {
       });
       if (!r.ok) throw new Error("voice unavailable (" + r.status + ")");
       const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      audio.onended = () => { btn.textContent = "🔊"; URL.revokeObjectURL(url); };
-      audio.onerror = () => { btn.textContent = "🔊"; };
+      url = URL.createObjectURL(blob);
+      audio.onended = () => { btn.textContent = "🔊"; if (url) URL.revokeObjectURL(url); };
+      audio.onerror = () => { btn.textContent = "🔊"; if (url) URL.revokeObjectURL(url); };
+      audio.src = url;
+      await unlock;
+      audio.muted = false;
       await audio.play();
     } catch (err) {
       btn.textContent = "🔊";
+      if (url) URL.revokeObjectURL(url);
+      console.warn("voice playback failed:", err);
     }
   }
 

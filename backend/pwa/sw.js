@@ -18,7 +18,7 @@
 
 "use strict";
 
-const VERSION = "lina-shell-v5";
+const VERSION = "lina-shell-v6";
 const SHELL_CACHE = VERSION;
 
 const SHELL_URLS = [
