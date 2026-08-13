@@ -247,6 +247,52 @@ def test_unknown_tool_refused():
     assert results[0]["status"] == "refused"
 
 
+# ── vision — her image sight ────────────────────────────────────────────────
+
+class FakeSight:
+    available = True
+
+    def __init__(self, description="a quiet garden at dawn"):
+        self.description = description
+        self.saw = None
+
+    async def describe_image(self, path):
+        self.saw = path
+        return self.description
+
+
+def test_parse_inspect_image_intent():
+    text = '```tool\n{"tool": "inspect_image", "args": {"path": "shot.png"}}\n```'
+    intents = parse_tool_intents(text)
+    assert len(intents) == 1
+    assert intents[0]["tool"] == "inspect_image"
+
+
+def test_vision_describes_image():
+    with tempfile.TemporaryDirectory() as ws:
+        img = os.path.join(ws, "shot.png")
+        with open(img, "w") as fh:
+            fh.write("png")
+        sight = FakeSight()
+        res = _run(execute_action_kind("vision", {"path": "shot.png"}, [ws], vision=sight))
+        assert res["ok"] is True
+        assert "garden" in res["output"]
+        assert sight.saw == img
+
+
+def test_vision_closed_sight_is_honest():
+    with tempfile.TemporaryDirectory() as ws:
+        res = _run(execute_action_kind("vision", {"path": "shot.png"}, [ws], vision=None))
+        assert res["ok"] is False
+        assert "not open" in res["output"]
+
+
+def test_vision_escape_refused():
+    with tempfile.TemporaryDirectory() as ws:
+        res = _run(execute_action_kind("vision", {"path": "/etc/passwd"}, [ws], vision=FakeSight()))
+        assert res["ok"] is False
+
+
 # ── reflection parser honesty (the memory-recording fix) ─────────────────────
 
 class FakeVoice:

@@ -115,7 +115,7 @@ def carve(size: int, psize: int) -> None:
 
     rss = resident_rss()
     print(f"[carve] pool live — {actual / 1024 ** 3:.2f} GiB at {POOL_PATH}")
-    print(f"[carve] header: clock=0 status=1 (DragonMap contract)")
+    print("[carve] header: clock=0 status=1 (DragonMap contract)")
     print(f"[carve] resident RSS: {rss / 1024 ** 3:.2f} GiB")
     mapping.flush()
 

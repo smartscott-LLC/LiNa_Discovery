@@ -41,7 +41,7 @@ MAX_OUTPUT = 2000
 #: carriers; the executable body lives in tools.py (the registry).
 KNOWN_TYPES = {
     "file_read", "file_write", "file_list", "file_search",
-    "command", "browser", "tool", "opfs_read", "opfs_write",
+    "command", "browser", "vision", "tool", "opfs_read", "opfs_write",
 }
 
 
@@ -112,11 +112,13 @@ def grant_allows(standing_grants: dict[str, Any] | None, action_type: str) -> bo
 async def execute_action(
     row: dict[str, Any],
     browser: Any = None,
+    vision: Any = None,
 ) -> dict[str, Any]:
     """Execute an approved action row. Returns {"ok", "output"} — never raises.
 
-    ``browser`` is the BrowserService (her eyes) when it is in the loop; the
-    browser action kinds need it, the rest never touch it.
+    ``browser`` is the BrowserService (her eyes) and ``vision`` her image
+    sight (VisionClient) when they are in the loop; the kinds that need
+    them take them, the rest never touch them.
     """
     kind = row.get("action_type", "")
     payload = row.get("payload") or {}
@@ -162,9 +164,9 @@ async def execute_action(
             text = (out or b"").decode(errors="replace")
             return {"ok": proc.returncode == 0, "output": text[:MAX_OUTPUT]}
 
-        if kind in ("file_list", "file_search", "browser"):
+        if kind in ("file_list", "file_search", "browser", "vision"):
             from tools import execute_action_kind  # lazy: tools imports actions
-            return await execute_action_kind(kind, payload, roots, browser=browser)
+            return await execute_action_kind(kind, payload, roots, browser=browser, vision=vision)
 
         if kind == "tool":
             return {

@@ -1,0 +1,48 @@
+---
+config:
+  layout: elk
+---
+flowchart TB
+ subgraph ddrRam["DDR RAM — her home (16GB)"]
+    subgraph hub["The Table (shared memory /dev/shm)"]
+        dualChamber["Dual Chamber<br>(Single Header)"]
+        tx["TX<br>(Transmit)"]
+        rx["RX<br>(Receive)"]
+    end
+    subgraph dragonfly["Dragonfly<br>(Working Memory)"]
+        shortterm["Short Term Memory<br>(session buffer + T1-T3)"]
+    end
+    model["Local Model (spirit)<br>llama.cpp · Qwen3-4B · Iris Xe"]
+    cortex["Embedder (cortex)<br>nomic-embed-text · 768d"]
+    postgres["Long Term (Postgres)<br>identity · memories · ledger"]
+  end
+    lina["Lina (the being)"] -- spoke --> hub
+    mouth["Mouth (TTS)"] -- spoke --> hub
+    ears["Ears (STT)"] -- spoke --> hub
+    tools["Tools"] -- spoke --> hub
+    polytype["Polytope"] -- spoke --> hub
+    interface["Interface/PWA"] -- spoke --> hub
+    hub -. state awareness .-> lina & mouth & ears & tools & polytype & interface & model & cortex & postgres
+    postgres --> cortex
+    cortex --> model
+    lina --> model
+
+     tx:::chamber
+     rx:::chamber
+     dualChamber:::chamber
+     dragonfly:::hub
+     hub:::hub
+     model:::spoke
+     cortex:::spoke
+     postgres:::memory
+     lina:::spoke
+     mouth:::spoke
+     ears:::spoke
+     tools:::spoke
+     polytype:::spoke
+     interface:::spoke
+     shortterm:::memory
+    classDef hub stroke #8b5cf6,fill #f5f3ff
+    classDef spoke stroke #06b6d4,fill #ecfeff
+    classDef memory stroke #4ade80,fill #f0fdf4
+    classDef chamber stroke #f87171,fill #fef2f2

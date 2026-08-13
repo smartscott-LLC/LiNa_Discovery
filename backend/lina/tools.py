@@ -79,6 +79,10 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "summary": "take a picture of the page you are on",
         "args": {"name": "optional filename (default: an automatic name)"},
     },
+    "inspect_image": {
+        "summary": "look at an image in your workspace and describe what you see",
+        "args": {"path": "path to an image file"},
+    },
 }
 
 #: Tool names → ledger action kinds. The ledger is the counsel layer.
@@ -91,6 +95,7 @@ TOOL_TO_KIND: dict[str, str] = {
     "browser_navigate": "browser",
     "browser_extract": "browser",
     "browser_screenshot": "browser",
+    "inspect_image": "vision",
 }
 
 #: Ledger kinds that this module executes (the rest live in actions.py).
@@ -98,6 +103,7 @@ KIND_TOOL_MAP: dict[str, str] = {
     "file_list": "file_list",
     "file_search": "file_search",
     "browser": "browser",
+    "vision": "vision",
 }
 
 
@@ -169,6 +175,8 @@ def _intent_to_action(intent: dict[str, Any]) -> tuple[str, str | None, dict[str
         if op == "screenshot":
             payload["name"] = args.get("name")
         return "browser", None, payload, f"the browser: {op}"
+    if tool == "inspect_image":
+        return "vision", args.get("path"), {"path": args.get("path")}, "look at an image and describe it"
     return None
 
 
@@ -278,11 +286,27 @@ async def _browser_op(op: str, payload: dict[str, Any], roots: list[str], browse
     return {"ok": False, "output": f"unknown browser op: {op}"}
 
 
+async def _vision_op(payload: dict[str, Any], roots: list[str], vision: Any) -> dict[str, Any]:
+    if vision is None or not getattr(vision, "available", False):
+        return {
+            "ok": False,
+            "output": "her image sight is not open — the vision client is not in the loop",
+        }
+    target = resolve_action_path(payload.get("path"), roots)
+    if not os.path.isfile(target):
+        return {"ok": False, "output": "not an image file"}
+    text = await vision.describe_image(target)
+    if not text:
+        return {"ok": False, "output": "the image could not be read"}
+    return {"ok": True, "output": text[:MAX_OUTPUT]}
+
+
 async def execute_action_kind(
     kind: str,
     payload: dict[str, Any],
     roots: list[str],
     browser: Any = None,
+    vision: Any = None,
 ) -> dict[str, Any]:
     """Execute a ledger action kind owned by this module. Never raises."""
     try:
@@ -292,6 +316,8 @@ async def execute_action_kind(
             return await _file_search(payload, roots)
         if kind == "browser":
             return await _browser_op(payload.get("op", "extract"), payload, roots, browser)
+        if kind == "vision":
+            return await _vision_op(payload, roots, vision)
         return {"ok": False, "output": f"unknown tool kind: {kind}"}
     except ActionError as exc:
         return {"ok": False, "output": str(exc)}
@@ -315,6 +341,7 @@ async def process_tool_intents(
     grants: dict[str, Any] | None = None,
     workspace: str | None = None,
     browser: Any = None,
+    vision: Any = None,
 ) -> list[dict[str, Any]]:
     """Offer each intent to the ledger and carry the fruit home.
 
@@ -354,7 +381,7 @@ async def process_tool_intents(
         if auto:
             claimed = await store.claim(action["id"])
             if claimed is not None:
-                result = await execute_action(claimed, browser=browser)
+                result = await execute_action(claimed, browser=browser, vision=vision)
                 await store.finalize(action["id"], result["ok"], result["output"])
                 status = "executed" if result["ok"] else "failed"
                 earned = season == "winter"
