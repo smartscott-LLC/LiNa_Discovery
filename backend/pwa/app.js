@@ -173,12 +173,38 @@ const LinaApp = (() => {
     $("#launcher").classList.toggle("thinking", on);
   }
 
+  function evalInfo(e) {
+    return `aligned=${e.is_aligned} · score=${(e.alignment_score || 0).toFixed(2)} · zone=${e.zone || "?"}`;
+  }
+
+  function appendProposals(msgEl, proposals) {
+    (proposals || []).forEach((p) => {
+      const line = document.createElement("div");
+      const cls = p.status === "executed" ? "ok" : p.status === "withheld" ? "bad" : "warn";
+      line.className = "proposal " + cls;
+      const label = ({
+        executed: "executed", failed: "failed",
+        awaiting_counsel: "awaiting your approval",
+        withheld: "withheld by the polytope", refused: "refused",
+      }[p.status] || p.status);
+      const earned = p.earned ? " · earned" : "";
+      line.innerHTML = `<span class="ptool">${escapeHtml(p.tool)}</span> — ${escapeHtml(label)}${earned}`;
+      if (p.output) {
+        const out = document.createElement("div");
+        out.className = "pout";
+        out.textContent = p.output;
+        line.appendChild(out);
+      }
+      msgEl.appendChild(line);
+    });
+  }
+
   async function sendChat(text) {
     appendMessage("user", text);
     setThinking(true);
     try {
       await ensureSession();
-      const r = await api("/lina/chat", {
+      const res = await fetch("/lina/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -187,32 +213,142 @@ const LinaApp = (() => {
           message: text,
         }),
       });
-      const e = r.evaluation || {};
-      const evalInfo = `aligned=${e.is_aligned} · score=${(e.alignment_score || 0).toFixed(2)} · zone=${e.zone || "?"}`;
-      const msgEl = appendMessage("ai", r.response, evalInfo);
-      (r.proposals || []).forEach((p) => {
-        const line = document.createElement("div");
-        const cls = p.status === "executed" ? "ok" : p.status === "withheld" ? "bad" : "warn";
-        line.className = "proposal " + cls;
-        const label = ({
-          executed: "executed", failed: "failed",
-          awaiting_counsel: "awaiting your approval",
-          withheld: "withheld by the polytope", refused: "refused",
-        }[p.status] || p.status);
-        const earned = p.earned ? " · earned" : "";
-        line.innerHTML = `<span class="ptool">${escapeHtml(p.tool)}</span> — ${escapeHtml(label)}${earned}`;
-        if (p.output) {
-          const out = document.createElement("div");
-          out.className = "pout";
-          out.textContent = p.output;
-          line.appendChild(out);
+      if (!res.ok || !res.body) throw new Error("stream unavailable (" + res.status + ")");
+
+      // Her message — it grows as she speaks.
+      const wrap = document.createElement("div");
+      wrap.className = "msg ai";
+      wrap.innerHTML =
+        `<div class="who">LINA</div><button class="copy-btn" title="Copy">copy</button>` +
+        `<div class="live"></div>`;
+      const live = wrap.querySelector(".live");
+      const box = $("#chat-log");
+      box.appendChild(wrap);
+      box.scrollTop = box.scrollHeight;
+
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      let full = "";
+      let done = null;
+      while (true) {
+        const { done: finished, value } = await reader.read();
+        if (finished) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop();
+        for (const part of parts) {
+          const line = part.split("\n").find((l) => l.startsWith("data:"));
+          if (!line) continue;
+          let evt;
+          try { evt = JSON.parse(line.slice(5)); } catch (_) { continue; }
+          if (evt.type === "token") {
+            full += evt.text;
+            live.textContent = full;
+            box.scrollTop = box.scrollHeight;
+          } else if (evt.type === "done") {
+            done = evt;
+            full = evt.response || full;
+          } else if (evt.type === "error") {
+            live.textContent = "(I couldn't reach my voice right now: " + evt.detail + ")";
+          }
         }
-        msgEl.appendChild(line);
+      }
+      if (!full && !done) throw new Error("no response received");
+      live.textContent = full;
+      if (done && done.evaluation) {
+        const evalDiv = document.createElement("div");
+        evalDiv.className = "eval";
+        evalDiv.textContent = evalInfo(done.evaluation);
+        wrap.appendChild(evalDiv);
+        appendProposals(wrap, done.proposals);
+      }
+      const speakBtn = document.createElement("button");
+      speakBtn.className = "speak-btn";
+      speakBtn.title = "Hear her say it";
+      speakBtn.textContent = "🔊";
+      speakBtn.addEventListener("click", () => speakText(wrap, full));
+      wrap.appendChild(speakBtn);
+      wrap.querySelector(".copy-btn").addEventListener("click", () => {
+        navigator.clipboard.writeText(full).catch(() => {});
+        const b = wrap.querySelector(".copy-btn");
+        b.textContent = "copied";
+        setTimeout(() => { b.textContent = "copy"; }, 1200);
       });
+      box.scrollTop = box.scrollHeight;
     } catch (err) {
       appendMessage("ai", `(I couldn't reach my voice right now: ${err.message})`);
     } finally {
       setThinking(false);
+    }
+  }
+
+  // ── her ears — the microphone ─────────────────────────────────────────────
+  let recorder = null;
+  let recording = false;
+  async function toggleMic() {
+    const btn = $("#mic-btn");
+    if (!recording) {
+      if (!navigator.mediaDevices || !window.MediaRecorder) {
+        alert("Your browser has no microphone support");
+        return;
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recorder = new MediaRecorder(stream);
+        const chunks = [];
+        recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+        recorder.onstop = async () => {
+          stream.getTracks().forEach((t) => t.stop());
+          btn.classList.remove("rec");
+          btn.textContent = "🎤";
+          const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+          setThinking(true);
+          try {
+            const fd = new FormData();
+            fd.append("file", blob, "lina.webm");
+            const r = await fetch("/lina/speech/transcribe", { method: "POST", body: fd });
+            const d = await r.json();
+            if (d.text) {
+              $("#chat-input").value = d.text;
+              $("#chat-input").focus();
+            } else {
+              alert("she could not hear that");
+            }
+          } catch (err) { alert("listening failed: " + err.message); }
+          finally { setThinking(false); }
+        };
+        recorder.start();
+        recording = true;
+        btn.classList.add("rec");
+        btn.textContent = "⏺";
+      } catch (err) { alert("the microphone was not granted: " + err.message); }
+    } else {
+      recorder.stop();
+      recording = false;
+    }
+  }
+
+  // ── her audible voice — the speaker ───────────────────────────────────────
+  async function speakText(wrap, text) {
+    const btn = wrap.querySelector(".speak-btn");
+    if (!btn) return;
+    btn.textContent = "…";
+    try {
+      const r = await fetch("/lina/speech/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!r.ok) throw new Error("voice unavailable (" + r.status + ")");
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onended = () => { btn.textContent = "🔊"; URL.revokeObjectURL(url); };
+      audio.onerror = () => { btn.textContent = "🔊"; };
+      await audio.play();
+    } catch (err) {
+      btn.textContent = "🔊";
     }
   }
 
@@ -392,6 +528,7 @@ const LinaApp = (() => {
     file_search: "She may search file contents without asking.",
     command: "She may run commands without asking.",
     browser: "She may open and read pages with her eyes without asking.",
+    vision: "She may look at images and describe them without asking.",
     opfs_read: "She may read the browser vault without asking.",
     opfs_write: "She may write the browser vault without asking.",
   };
@@ -571,6 +708,8 @@ const LinaApp = (() => {
       input.value = "";
       sendChat(text);
     });
+
+    $("#mic-btn").addEventListener("click", toggleMic);
 
     // summon her
     document.addEventListener("keydown", (e) => {

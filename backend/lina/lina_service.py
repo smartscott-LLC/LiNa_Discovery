@@ -65,9 +65,13 @@ Environment variables:
     IPC_RX_PATH         — RX shared memory file (default: /dev/shm/lina_ipc_rx.bin)
     IPC_FORESIGHT_TIMEOUT — Triton RX wait window in seconds (default: 2.5)
     TRITON_BIN          — the Rust spoke binary (default: repo release build, then PATH)
-    GEMINI_VISION_MODEL — the image-sight model for inspect_image (default: gemini-2.0-flash)
+    GEMINI_VISION_MODEL — the image-sight model for inspect_image (default: gemini-flash-latest)
     GEMINI_VISION_BASE_URL — optional endpoint override for image sight
-                           (default: Gemini's OpenAI-compatible endpoint)
+                           (default: Gemini's native generateContent endpoint)
+    TTS_MODEL           — text-to-speech model (default: hexgrad/kokoro-82m)
+    STT_MODEL           — speech-to-text model (default: openai/whisper-1)
+    SPEECH_VOICE        — default TTS voice (default: af_heart)
+    SPEECH_BASE_URL     — optional speech endpoint override (default: OpenRouter /api/v1)
     LINA_MAX_TOKENS     — max response tokens (default: 1024)
     LINA_VOICE_MAX_CONCURRENT — concurrent voice calls (default: 4)
     LINA_STATE_DIR      — runtime storage root — logs, state, workspace
@@ -133,7 +137,7 @@ from aiomisc.service.periodic import PeriodicService
 from aiomisc.service.uvicorn import UvicornService
 from browser import BrowserService
 from embeddings import EmbeddingClient
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -147,6 +151,7 @@ from mps import (
     reflect_messages,
 )
 from pydantic import BaseModel
+from speech import SpeechService
 from tools import parse_tool_intents, process_tool_intents
 from vision import VisionService
 
@@ -1990,6 +1995,40 @@ async def chat(req: ChatRequest):
     return await core.chat(req)
 
 
+class SpeakRequest(BaseModel):
+    text: str
+    voice: str | None = None
+
+
+@app.post("/lina/speech/speak")
+async def speak(req: SpeakRequest):
+    """Her audible voice — text in, her spoken words (WAV) out. The same
+    OpenAI-compatible audio contract her ears use, made playable."""
+    client = _context_get("speech_client")
+    if client is None or not getattr(client, "available", False):
+        raise HTTPException(503, "her voice is not available — OPENROUTER_API_KEY is not set")
+    wav = await client.speak(req.text, voice=req.voice)
+    if not wav:
+        raise HTTPException(502, "she could not speak just now")
+    return Response(content=wav, media_type="audio/wav")
+
+
+@app.post("/lina/speech/transcribe")
+async def transcribe(file: UploadFile = File(...)):
+    """Her ears — audio in, the words she heard (text) out."""
+    client = _context_get("speech_client")
+    if client is None or not getattr(client, "available", False):
+        raise HTTPException(503, "her ears are not available — OPENROUTER_API_KEY is not set")
+    audio = await file.read()
+    if not audio:
+        raise HTTPException(400, "no audio received")
+    mime = file.content_type or "audio/webm"
+    text = await client.transcribe(audio, filename=file.filename or "lina.webm", mime=mime)
+    if text is None:
+        raise HTTPException(502, "she could not hear that")
+    return {"text": text}
+
+
 @app.post("/lina/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request):
     """Streaming chat — her words arrive as they flow, not pre-assembled.
@@ -3227,6 +3266,9 @@ def main() -> None:
             0,
             BrowserService(timeout=float(os.getenv("BROWSER_TIMEOUT", "15"))),
         )
+    # Her ears and her audible voice — in the loop. Dark until the speech
+    # key is set; the endpoints say so honestly.
+    services.insert(0, SpeechService())
     # Her image sight — Gemini, in the loop. Dark until GEMINI_API_KEY is
     # set; the tool says so honestly.
     services.insert(0, VisionService())

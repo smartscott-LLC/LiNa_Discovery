@@ -97,6 +97,12 @@ services:
       - BROWSER_TIMEOUT=${BROWSER_TIMEOUT:-15}
       - TRITON_BIN=${TRITON_BIN:-/usr/local/bin/triton}
       - GEMINI_VISION_MODEL=${GEMINI_VISION_MODEL:-gemini-flash-latest}
+      # Her ears and her audible voice (TTS/STT via OpenRouter for now;
+      # the local kokoro/whisper phase swaps the base URL and models).
+      - TTS_MODEL=${TTS_MODEL:-hexgrad/kokoro-82m}
+      - STT_MODEL=${STT_MODEL:-openai/whisper-1}
+      - SPEECH_VOICE=${SPEECH_VOICE:-af_heart}
+      - SPEECH_BASE_URL=${SPEECH_BASE_URL:-}
       # Optional services (opt-in).
       - METRICS_ENABLED=${METRICS_ENABLED:-0}
       - HEARTBEAT_ENABLED=${HEARTBEAT_ENABLED:-0}

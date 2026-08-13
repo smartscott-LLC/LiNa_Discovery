@@ -118,6 +118,15 @@ textarea { resize: vertical; }
   transition: opacity var(--dur) var(--ease);
 }
 .msg:hover .copy-btn { opacity: 1; }
+.msg .live { user-select: text; }
+.speak-btn {
+  position: absolute; top: 6px; right: 58px; opacity: 0;
+  font-size: 12px; padding: 3px 8px; border-radius: 6px; background: var(--surface-3); color: var(--text-mid);
+  transition: opacity var(--dur) var(--ease);
+}
+.msg:hover .speak-btn { opacity: 1; }
+.mic-btn { font-size: 15px; padding: 0 10px; border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border); }
+.mic-btn.rec { color: var(--err); animation: pulse 1.2s ease-in-out infinite; border-color: var(--err); }
 
 .input-row { display: flex; gap: 8px; padding: 12px 14px 14px; border-top: 1px solid var(--border); }
 .input-row input { flex: 1; }
