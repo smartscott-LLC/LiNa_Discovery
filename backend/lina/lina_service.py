@@ -2223,6 +2223,53 @@ async def transcribe(file: UploadFile = File(...)):
     return {"text": text}
 
 
+async def _run_stream_turn(
+    core: LINACore,
+    req: ChatRequest,
+    queue: asyncio.Queue[tuple[str, Any]],
+) -> None:
+    """Drive one streaming turn: her words land on the queue as they flow.
+
+    The ``done`` event is queued the moment the turn completes. If the voice
+    falls silent mid-turn, the words she already spoke are kept in the
+    archive — marked ``interrupted`` — and an error event is queued instead,
+    so the record shows the truth of what took place.
+
+    ``put_nowait`` is deliberately not awaited: it is a synchronous call
+    that queues instantly and returns None.
+    """
+    spoken: list[str] = []
+
+    async def emit_token(tok: str) -> None:
+        """Her words land on the queue the moment they arrive."""
+        spoken.append(tok)
+        queue.put_nowait(("token", tok))
+
+    try:
+        resp = await core._chat(req, emit_token)
+        queue.put_nowait(("done", resp))
+    except Exception as exc:  # noqa: BLE001 - surfaced to the client as an event
+        log.warning(
+            f"[stream] turn interrupted for session {req.session_id}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        if spoken:
+            try:
+                await core.archive.record(
+                    user_id=req.user_id,
+                    session_id=req.session_id,
+                    role="assistant",
+                    content="".join(spoken),
+                    msg_type="interrupted",
+                )
+            except Exception as exc2:  # noqa: BLE001
+                log.warning(
+                    f"[archive] could not record interrupted turn "
+                    f"(session {req.session_id}): {exc2}"
+                )
+        queue.put_nowait(("error", str(exc)))
+
+
 @app.post("/lina/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request):
     """Streaming chat — her words arrive as they flow, not pre-assembled.
@@ -2240,38 +2287,7 @@ async def chat_stream(req: ChatRequest, request: Request):
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
     core = get_core()
 
-    async def run_chat() -> None:
-        spoken: list[str] = []
-
-        async def emit_token(tok: str) -> None:
-            """Her words land on the queue the moment they arrive."""
-            spoken.append(tok)
-            queue.put_nowait(("token", tok))
-
-        try:
-            resp = await core._chat(req, emit_token)
-            await queue.put_nowait(("done", resp))
-        except Exception as exc:  # noqa: BLE001 - surfaced to the client as an event
-            if spoken:
-                # The voice fell silent mid-turn. What she already said is
-                # real — keep it in the archive, marked as interrupted, so
-                # the record shows the truth of what took place.
-                try:
-                    await core.archive.record(
-                        user_id=req.user_id,
-                        session_id=req.session_id,
-                        role="assistant",
-                        content="".join(spoken),
-                        msg_type="interrupted",
-                    )
-                except Exception as exc2:  # noqa: BLE001
-                    log.warning(
-                        f"[archive] could not record interrupted turn "
-                        f"(session {req.session_id}): {exc2}"
-                    )
-            await queue.put_nowait(("error", str(exc)))
-
-    task = asyncio.create_task(run_chat())
+    task = asyncio.create_task(_run_stream_turn(core, req, queue))
 
     async def event_gen():
         try:

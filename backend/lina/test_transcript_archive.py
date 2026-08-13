@@ -18,6 +18,7 @@ from lina_service import (  # noqa: E402
     TranscriptArchive,
     ChatRequest,
     SessionEndRequest,
+    _run_stream_turn,
     _session_messages_for_reflection,
 )
 from value_engine import ValueEngine  # noqa: E402
@@ -81,6 +82,12 @@ class FakeVoice:
 
     async def generate(self, system: str, messages: list[dict], **kwargs: Any) -> str:
         return self.payload
+
+    async def generate_stream(self, system: str, messages: list[dict], **kwargs: Any):
+        """Emit the response in three chunks so the stream path is exercised."""
+        n = max(1, len(self.payload) // 3)
+        for i in range(0, len(self.payload), n):
+            yield self.payload[i : i + n]
 
 
 def make_engine() -> ValueEngine:
@@ -163,6 +170,69 @@ async def path_chat_archives_user_and_lina():
 
 def test_chat_archives_user_and_lina():
     asyncio.run(path_chat_archives_user_and_lina())
+
+
+# ---------------------------------------------------------------------------
+# The stream driver — done is queued exactly once; only real interruptions
+# are archived as such
+# ---------------------------------------------------------------------------
+
+async def path_stream_success_queues_done_once():
+    db = FakeDB(eval_id="eval-7")
+    core = LINACore(db, cast(Any, FakeCache()), cast(Any, FakeVoice(RESPONSE)))
+    engine = make_engine()
+
+    async def get_engine(user_id: str) -> ValueEngine:
+        return engine
+
+    core.get_engine = get_engine  # type: ignore[method-assign]
+
+    queue: Any = asyncio.Queue()
+    req = ChatRequest(user_id="u1", session_id="s1", message="stream me")
+    await _run_stream_turn(core, req, queue)
+
+    kinds: list[str] = []
+    while not queue.empty():
+        kinds.append(queue.get_nowait()[0])
+    assert kinds and all(k == "token" for k in kinds[:-1]), kinds
+    assert kinds[-1] == "done", "one done, exactly — and it is queued before the turn ends"
+    inserts = [a for sql, a in db.executes if "lina_transcripts" in sql]
+    assert len(inserts) == 2, "user + delivered assistant — no duplicate"
+    assert all(a[4] != "interrupted" for a in inserts), "a successful turn is never interrupted"
+
+
+def test_stream_success_queues_done_once():
+    asyncio.run(path_stream_success_queues_done_once())
+
+
+async def path_stream_failure_archives_spoken_words():
+    db = FakeDB(eval_id="eval-7")
+    core = LINACore(db, cast(Any, FakeCache()), cast(Any, FakeVoice(RESPONSE)))
+
+    async def dying_voice(req, on_token):
+        await on_token("words ")
+        await on_token("spoken")
+        raise RuntimeError("the voice fell silent")
+
+    core._chat = dying_voice  # type: ignore[method-assign]
+
+    queue: Any = asyncio.Queue()
+    req = ChatRequest(user_id="u1", session_id="s1", message="say something")
+    await _run_stream_turn(core, req, queue)
+
+    kinds: list[str] = []
+    while not queue.empty():
+        kinds.append(queue.get_nowait()[0])
+    assert kinds[-1] == "error", kinds
+    inserts = [a for sql, a in db.executes if "lina_transcripts" in sql]
+    assert len(inserts) == 1
+    row = inserts[0]
+    assert row[2] == "assistant" and row[3] == "words spoken"
+    assert row[4] == "interrupted", "the words she already said are kept, marked honestly"
+
+
+def test_stream_failure_archives_spoken_words():
+    asyncio.run(path_stream_failure_archives_spoken_words())
 
 
 # ---------------------------------------------------------------------------
