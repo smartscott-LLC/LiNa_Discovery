@@ -117,9 +117,41 @@ def carve(size: int, psize: int) -> None:
     print(f"[carve] pool live — {actual / 1024 ** 3:.2f} GiB at {POOL_PATH}")
     print(f"[carve] header: clock=0 status=1 (DragonMap contract)")
     print(f"[carve] resident RSS: {rss / 1024 ** 3:.2f} GiB")
-    print(f"[carve] region plan (4 GiB pool): control @64 · chambers @4K · "
-          "weights @1.5G · working @3.5G")
     mapping.flush()
+
+
+#: hugetlbfs rejects unaligned write(); the weights are copied via mmap —
+#: the same path she will use to live on them.
+_WEIGHTS_DST = "/mnt/huge/Qwen3-4B-Q4_K_M.gguf"
+
+
+def place_weights(source: str) -> None:
+    """Copy the GGUF onto the carve, padded to the 2MB boundary, written
+    via mmap (aligned writes are the only writes hugetlbfs accepts).
+    Idempotent: a complete copy is left alone."""
+    src = os.path.realpath(source)
+    if not os.path.isfile(src):
+        print(f"[carve] weights source not found: {src}")
+        return
+    size = os.path.getsize(src)
+    if os.path.exists(_WEIGHTS_DST) and os.path.getsize(_WEIGHTS_DST) >= size:
+        print(f"[carve] weights already on the carve ({_WEIGHTS_DST})")
+        return
+    CHUNK = 2 * 1024 * 1024
+    padded = ((size + CHUNK - 1) // CHUNK) * CHUNK
+    fd = os.open(_WEIGHTS_DST, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.ftruncate(fd, padded)
+    mapping = mmap.mmap(fd, padded, mmap.MAP_SHARED)
+    os.close(fd)
+    with open(src, "rb") as fin:
+        offset = 0
+        while offset < size:
+            block = fin.read(CHUNK)
+            mapping[offset:offset + len(block)] = block
+            offset += len(block)
+    mapping.flush()
+    mapping.close()
+    print(f"[carve] weights on the carve: {padded / 1e9:.2f} GB at {_WEIGHTS_DST}")
 
 
 def release() -> None:
@@ -140,7 +172,8 @@ def release() -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--size", default="1G", help="pool size (default: 1G)")
-    ap.add_argument("--page", default="1G", help="huge page size, 1G or 2M (default: 1G)")
+    ap.add_argument("--page", default="2M", help="huge page size, 1G or 2M (default: 2M)")
+    ap.add_argument("--weights", default="", help="GGUF path to place on the carve")
     ap.add_argument("--release", action="store_true", help="tear the pool down")
     args = ap.parse_args()
 
@@ -151,6 +184,8 @@ def main() -> int:
         print("the carve needs root — run with sudo", file=sys.stderr)
         return 1
     carve(parse_size(args.size), page_size_bytes(args.page))
+    if args.weights:
+        place_weights(args.weights)
     return 0
 
 

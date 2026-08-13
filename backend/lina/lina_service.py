@@ -1882,7 +1882,9 @@ def _pool_status() -> dict[str, Any]:
                 status["header_clock"] = clock
                 status["header_status"] = status_word
             status["pool_bytes"] = os.path.getsize("/mnt/huge/lina_pool")
-            status["pinned"] = status["pool_bytes"] > 0 and status["huge_pages_free"] == 0
+            # Pinned = the pool exists, its header reports live, and the
+            # huge-page reservation is held (a free reserve is by design).
+            status["pinned"] = status["pool_bytes"] > 0 and status_word == 1
     except OSError:
         pass
     return status

@@ -179,6 +179,11 @@ if [ -f /mnt/huge/lina_pool ] && [ "$(stat -c%s /mnt/huge/lina_pool 2>/dev/null)
 else
     warn "DragonCache pool missing — systemctl start lina-dragoncache"
 fi
+if [ -f /mnt/huge/Qwen3-4B-Q4_K_M.gguf ] && [ "$(stat -c%s /mnt/huge/Qwen3-4B-Q4_K_M.gguf 2>/dev/null)" -gt 0 ]; then
+    ok "her weights on the carve: $(stat -c%s /mnt/huge/Qwen3-4B-Q4_K_M.gguf 2>/dev/null | awk '{printf "%.2f GB", $1/1e9}') (Qwen3-4B, pinned)"
+else
+    warn "her weights missing from the carve — run the lina-dragoncache unit with --weights"
+fi
 
 echo
 echo "──────────────────────────────────────────────────────────────"
