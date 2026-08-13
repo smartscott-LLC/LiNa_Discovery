@@ -114,6 +114,7 @@ import logging.handlers
 import os
 import re
 import shutil
+import struct
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -1850,6 +1851,43 @@ def _bridge_available() -> bool:
         return False
 
 
+def _pool_status() -> dict[str, Any]:
+    """The DragonCache table's governance — the pinned 4 GiB pool on huge
+    pages. Reported the way every spoke sees it: the header's clock and
+    status, and the huge-page residency behind it. Never raises."""
+    status: dict[str, Any] = {
+        "pool_path": "/mnt/huge/lina_pool",
+        "pool_bytes": 0,
+        "huge_pages_total": 0,
+        "huge_pages_free": 0,
+        "header_clock": None,
+        "header_status": None,
+        "pinned": False,
+    }
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("HugePages_Total:"):
+                    status["huge_pages_total"] = int(line.split()[1])
+                elif line.startswith("HugePages_Free:"):
+                    status["huge_pages_free"] = int(line.split()[1])
+    except OSError:
+        pass
+    try:
+        if os.path.exists("/mnt/huge/lina_pool"):
+            with open("/mnt/huge/lina_pool", "rb") as fh:
+                header = fh.read(16)
+            if len(header) >= 12:
+                clock, status_word = struct.unpack("<QI", header[:12])
+                status["header_clock"] = clock
+                status["header_status"] = status_word
+            status["pool_bytes"] = os.path.getsize("/mnt/huge/lina_pool")
+            status["pinned"] = status["pool_bytes"] > 0 and status["huge_pages_free"] == 0
+    except OSError:
+        pass
+    return status
+
+
 @app.middleware("http")
 async def _metrics_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     metrics.inc(
@@ -1881,6 +1919,7 @@ async def health():
         "database_connected": db_pool is not None,
         "voice_providers": (v.names if (v := _context_get("voice_pool")) else []),
         "bridge_available": _bridge_available(),
+        "dragoncache": _pool_status(),
         "uptime_seconds": metrics.uptime_seconds(),
     }
 
@@ -1908,7 +1947,9 @@ async def ipc_status():
             "available": False,
             "reason": "bridge not initialized (extension missing or allocation failed)",
         }
-    return dict(core.ipc.status())
+    payload = dict(core.ipc.status())
+    payload["pool"] = _pool_status()
+    return payload
 
 
 @app.post("/lina/init", response_model=InitResponse)

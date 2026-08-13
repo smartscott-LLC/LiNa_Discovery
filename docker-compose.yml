@@ -123,6 +123,9 @@ services:
       # Actions approved through the HITL ledger execute here — her shared
       # workspace, where her files live.
       - workspace:/workspace
+      # The DragonCache — the pinned 4GiB pool on huge pages, read-only so
+      # her service can report its governance (the table's status).
+      - /mnt/huge:/mnt/huge:ro
       # Live design surface: your theme and the shell mount read-only from
       # the host, so color and UI edits appear without a rebuild (the image
       # still bakes defaults for deployment).

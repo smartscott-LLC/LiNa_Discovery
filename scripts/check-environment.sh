@@ -164,6 +164,22 @@ if command -v docker >/dev/null 2>&1 && [ -n "$pg_user" ] && [ -n "$pg_db" ]; th
     esac
 fi
 
+# ── 11. The DragonCache — the pinned pool on huge pages ───────────────────────
+echo
+echo "── The DragonCache — the pinned pool ──"
+hp_total=$(grep '^HugePages_Total:' /proc/meminfo | awk '{print $2}')
+hp_free=$(grep '^HugePages_Free:' /proc/meminfo | awk '{print $2}')
+if [ -n "$hp_total" ] && [ "$hp_total" -gt 0 ]; then
+    ok "huge pages reserved: $hp_total total, $hp_free free"
+else
+    warn "no huge pages reserved — run the lina-dragoncache service (boot-time GRUB line present?)"
+fi
+if [ -f /mnt/huge/lina_pool ] && [ "$(stat -c%s /mnt/huge/lina_pool 2>/dev/null)" -gt 0 ]; then
+    ok "DragonCache pool present: $(stat -c%s /mnt/huge/lina_pool 2>/dev/null | awk '{printf "%.2f GiB", $1/1073741824}') at /mnt/huge/lina_pool"
+else
+    warn "DragonCache pool missing — systemctl start lina-dragoncache"
+fi
+
 echo
 echo "──────────────────────────────────────────────────────────────"
 echo "Result: $PASS ok, $WARN warnings, $FAIL failures"
