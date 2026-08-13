@@ -57,10 +57,17 @@ Environment variables:
     DEEPSEEK_API_KEY    — activates DeepSeek
     OPENROUTER_API_KEY  — activates OpenRouter
     GEMINI_API_KEY      — activates Gemini
+    LOCAL_VOICE_URL     — her local instrument's endpoint (default: http://127.0.0.1:8081/v1)
+    LOCAL_VOICE_MODEL   — her local instrument's model (default: qwen3-4b)
+    LOCAL_VOICE_API_KEY — local dummy key (the engine does not authenticate)
     HOST / PORT         — service host and port (defaults: 0.0.0.0 / 8001)
     IPC_TX_PATH         — TX shared memory file (default: /dev/shm/lina_ipc_tx.bin)
     IPC_RX_PATH         — RX shared memory file (default: /dev/shm/lina_ipc_rx.bin)
     IPC_FORESIGHT_TIMEOUT — Triton RX wait window in seconds (default: 2.5)
+    TRITON_BIN          — the Rust spoke binary (default: repo release build, then PATH)
+    GEMINI_VISION_MODEL — the image-sight model for inspect_image (default: gemini-2.0-flash)
+    GEMINI_VISION_BASE_URL — optional endpoint override for image sight
+                           (default: Gemini's OpenAI-compatible endpoint)
     LINA_MAX_TOKENS     — max response tokens (default: 1024)
     LINA_VOICE_MAX_CONCURRENT — concurrent voice calls (default: 4)
     LINA_STATE_DIR      — runtime storage root — logs, state, workspace
@@ -102,6 +109,7 @@ import logging
 import logging.handlers
 import os
 import re
+import shutil
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -140,7 +148,9 @@ from mps import (
 )
 from pydantic import BaseModel
 from tools import parse_tool_intents, process_tool_intents
+from vision import VisionService
 
+import actions
 import metrics
 from actions import (
     ActionError,
@@ -370,9 +380,11 @@ async def ensure_actions_table(pool: asyncpg.Pool) -> None:
     )
     # Self-heal the action-type constraint: the ledger grew new kinds and a
     # stale check (from an older deployment) would refuse them. Drop and
-    # re-add with the full set — cheap, idempotent, and loud if it fails.
+    # re-add — generated from KNOWN_TYPES (actions.py), the single source of
+    # truth, so the constraint can never drift from the code.
+    _types_sql = ", ".join(repr(t) for t in sorted(actions.KNOWN_TYPES))
     await pool.execute(
-        """
+        f"""
         DO $$
         BEGIN
             IF EXISTS (
@@ -382,10 +394,7 @@ async def ensure_actions_table(pool: asyncpg.Pool) -> None:
                 ALTER TABLE lina_actions DROP CONSTRAINT lina_actions_action_type_check;
             END IF;
             ALTER TABLE lina_actions ADD CONSTRAINT lina_actions_action_type_check
-                CHECK (action_type IN (
-                    'file_read', 'file_write', 'file_list', 'file_search',
-                    'command', 'browser', 'tool', 'opfs_read', 'opfs_write'
-                ));
+                CHECK (action_type IN ({_types_sql}));
         END $$;
         """
     )
@@ -894,6 +903,12 @@ Tools within your reach:
 - browser_navigate — open a page and read it (args: url)
 - browser_extract — read the page you are on
 - browser_screenshot — take a picture (args: name)
+- inspect_image — look at an image in your workspace and describe it (args: path)
+
+Your instruments: your voice is DeepSeek (chat), your likeness is
+OpenRouter (embeddings), and your image sight is Gemini (vision) — you
+choose the right instrument for the right job; the ones that are dark say
+so when you reach for them.
 
 The places you may touch: your desk (/workspace), your home and its logs
 (/app), your state (/app/runtime). When you reach for something, it may be
@@ -1399,6 +1414,14 @@ class LINACore:
         }
 
     async def chat(self, req: ChatRequest) -> ChatResponse:
+        """Main conversation endpoint — message in, LINA's response out."""
+        return await self._chat(req, on_token=None)
+
+    async def _chat(
+        self,
+        req: ChatRequest,
+        on_token: Callable[[str], Awaitable[None]] | None,
+    ) -> ChatResponse:
         _chat_t0 = time.monotonic()
         # 1. Load context — recall shapes the memory blocks by likeness to
         # the present message (MPS Phase F).
@@ -1459,17 +1482,28 @@ class LINACore:
 
         # 5. Call the voice (LLM) — concurrent with component foresight.
         messages = api_history + [{"role": "user", "content": req.message}]
-        voice_task = asyncio.create_task(self._call_voice(system_prompt, messages))
+        voice_task = asyncio.create_task(
+            self._call_voice(system_prompt, messages, on_token=on_token)
+        )
 
         # 5a. Component foresight: while the voice is answering (500–1000 ms),
         # Triton is already reading Chamber A, dispatching sub-agents, and
         # pre-populating Chamber B. Drain RX now so the context is in hand
         # the moment the voice's response lands. Advisory only — the polytope
         # remains the only authority. Never blocks: bounded by
-        # IPC_FORESIGHT_TIMEOUT_SECONDS.
+        # IPC_FORESIGHT_TIMEOUT_SECONDS — and when the spoke is down the
+        # window shrinks so a dead spoke can never stall her voice.
         foresight_context = None
+        triton_expected = False
         if self.ipc is not None:
-            deadline = time.monotonic() + IPC_FORESIGHT_TIMEOUT_SECONDS
+            triton = _context_get("triton_service")
+            triton_alive = triton is not None and getattr(triton, "alive", False)
+            window = IPC_FORESIGHT_TIMEOUT_SECONDS
+            if not triton_alive:
+                window = min(window, 0.3)  # the spoke is not answering — do not wait on it
+            else:
+                triton_expected = True
+            deadline = time.monotonic() + window
             while time.monotonic() < deadline:
                 try:
                     raw = self.ipc.pop_rx()
@@ -1481,10 +1515,10 @@ class LINACore:
                     log.warning(f"[IPC] RX pop failed: {exc}")
                     break
                 await asyncio.sleep(0.05)
-            if foresight_context is None:
+            if foresight_context is None and triton_expected:
                 log.warning(
                     "[IPC] Triton unresponsive — timed out after "
-                    f"{IPC_FORESIGHT_TIMEOUT_SECONDS:.1f}s; continuing without context"
+                    f"{window:.1f}s; continuing without context"
                 )
 
         try:
@@ -1532,6 +1566,7 @@ class LINACore:
             elif _action_store is not None:
                 grants = await _get_standing_grants(req.user_id)
                 browser = _context_get("browser_service")
+                vision = _context_get("vision_client")
                 proposals = await process_tool_intents(
                     intents,
                     user_id=req.user_id,
@@ -1541,6 +1576,7 @@ class LINACore:
                     grants=grants,
                     workspace=WORKSPACE_PATH,
                     browser=browser,
+                    vision=vision,
                 )
                 for p in proposals:
                     if p.get("status") in ("executed", "failed"):
@@ -1689,17 +1725,34 @@ class LINACore:
             proposals=proposals,
         )
 
-    async def _call_voice(self, system_prompt: str, messages: list[dict[str, Any]]) -> str:
+    async def _call_voice(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        on_token: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
         """The voice (LLM) call, isolated so component foresight can run
         concurrently while it is in flight. Provider-agnostic: the pool
-        owns the fallback chain."""
+        owns the fallback chain. When ``on_token`` is given, the voice
+        streams — she shapes her words as they flow."""
         if self.voice is None:
             raise VoicePoolError("no voice pool available")
-        return await self.voice.generate(
+        if on_token is None:
+            return await self.voice.generate(
+                system=system_prompt,
+                messages=messages,
+                max_tokens=LINA_MAX_TOKENS,
+            )
+        parts: list[str] = []
+        async for chunk in self.voice.generate_stream(
             system=system_prompt,
             messages=messages,
             max_tokens=LINA_MAX_TOKENS,
-        )
+        ):
+            if chunk:
+                parts.append(chunk)
+                await on_token(chunk)
+        return "".join(parts)
 
     async def _get_session_number(self, user_id: str, session_id: str) -> int:
         row = await self.db.fetchrow(
@@ -1935,6 +1988,55 @@ async def chat(req: ChatRequest):
     """Main conversation endpoint — message in, LINA's response out."""
     core = get_core()
     return await core.chat(req)
+
+
+@app.post("/lina/chat/stream")
+async def chat_stream(req: ChatRequest, request: Request):
+    """Streaming chat — her words arrive as they flow, not pre-assembled.
+
+    SSE events over ``text/event-stream``:
+      ``{"type": "token", "text": ...}``   — one or more, as she speaks
+      ``{"type": "done", "response": ..., "evaluation": ...,
+           "proposals": ...}``             — the finished turn
+      ``{"type": "error", "detail": ...}`` — the voice could not answer
+
+    The chat pipeline (polytope, ledger, memory) still runs to completion
+    before the ``done`` event; streaming changes how her words arrive, not
+    what they mean.
+    """
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    core = get_core()
+
+    async def emit_token(tok: str) -> None:
+        """Her words land on the queue the moment they arrive."""
+        queue.put_nowait(("token", tok))
+
+    async def run_chat() -> None:
+        try:
+            resp = await core._chat(req, emit_token)
+            await queue.put_nowait(("done", resp))
+        except Exception as exc:  # noqa: BLE001 - surfaced to the client as an event
+            await queue.put_nowait(("error", str(exc)))
+
+    task = asyncio.create_task(run_chat())
+
+    async def event_gen():
+        try:
+            while True:
+                kind, payload = await queue.get()
+                if kind == "token":
+                    yield f"data: {json.dumps({'type': 'token', 'text': payload})}\n\n"
+                elif kind == "done":
+                    yield f"data: {json.dumps({'type': 'done', 'response': payload.response, 'evaluation': payload.evaluation, 'emotional_marker': payload.emotional_marker, 'proposals': payload.proposals})}\n\n"
+                    break
+                else:
+                    yield f"data: {json.dumps({'type': 'error', 'detail': payload})}\n\n"
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
 @app.post("/lina/session/end", response_model=SessionEndResponse)
@@ -2437,7 +2539,7 @@ class ActionUserRequest(BaseModel):
 
 GRANTABLE_ACTION_TYPES = [
     "file_read", "file_write", "file_list", "file_search",
-    "command", "browser", "opfs_read", "opfs_write",
+    "command", "browser", "vision", "opfs_read", "opfs_write",
 ]
 
 SEASON_GRANT_GUIDANCE = {
@@ -2588,7 +2690,8 @@ async def propose_action(req: ProposeActionRequest):
             claimed = await _action_store.claim(action["id"])
             if claimed is not None:
                 result = await execute_action(
-                    claimed, browser=_context_get("browser_service")
+                    claimed, browser=_context_get("browser_service"),
+                    vision=_context_get("vision_client"),
                 )
                 await _action_store.finalize(action["id"], result["ok"], result["output"])
                 status = "executed" if result["ok"] else "failed"
@@ -2642,7 +2745,11 @@ async def approve_action(action_id: str, req: ActionUserRequest):
             raise HTTPException(409, "action was rejected")
         raise HTTPException(404, "pending action not found")
 
-    result = await execute_action(row, browser=_context_get("browser_service"))
+    result = await execute_action(
+        row,
+        browser=_context_get("browser_service"),
+        vision=_context_get("vision_client"),
+    )
     await _action_store.finalize(action_id, result["ok"], result["output"])
     status = "executed" if result["ok"] else "failed"
     await _inject_fruit(row)
@@ -2726,7 +2833,11 @@ async def modify_action(action_id: str, req: ModifyActionRequest):
     claimed = await _action_store.claim(action_id)
     if claimed is None:
         raise HTTPException(409, "action changed while modifying")
-    result = await execute_action(claimed, browser=_context_get("browser_service"))
+    result = await execute_action(
+        claimed,
+        browser=_context_get("browser_service"),
+        vision=_context_get("vision_client"),
+    )
     await _action_store.finalize(action_id, result["ok"], result["output"])
     status = "executed" if result["ok"] else "failed"
     await _inject_fruit(claimed)
@@ -2897,6 +3008,84 @@ class IPCBridgeService(Service):
             log.info("[IPC] bridge shut down cleanly")
 
 
+def _find_triton_binary() -> str | None:
+    """Locate the Rust spoke: the repo's release build, then PATH."""
+    repo = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "triton", "target", "release", "triton",
+    )
+    if os.path.isfile(repo):
+        return repo
+    return shutil.which("triton")
+
+
+class TritonService(Service):
+    """Owns the Rust spoke's lifecycle — Triton, the observer at the table.
+
+    The binary maps the same ``/dev/shm`` chambers Python maps (memmap3 on
+    its side, stdlib mmap on ours — the same physical frames, no bindings).
+    Nothing in the loop speaks to it directly; it sits at the table and
+    answers when the chambers are written.
+
+    The spoke is spawned here because a process is either a spoke on the
+    table or a service in a loop — nothing runs unmanaged. If the binary is
+    missing the service stays honest: ``alive=False``, a loud log line, and
+    the foresight window shrinks so her voice is never stalled by a dead
+    spoke.
+    """
+
+    def __init__(self, binary: str | None = None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.binary = binary or os.getenv("TRITON_BIN") or _find_triton_binary()
+        self.proc: asyncio.subprocess.Process | None = None
+        self.alive = False
+
+    async def start(self) -> None:
+        self.context["triton_service"] = self
+        if not self.binary or not os.path.isfile(self.binary):
+            log.warning(
+                f"[IPC] triton binary not found ({self.binary!r}) — the spoke is "
+                "not running; foresight will not stall her voice"
+            )
+            return
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                self.binary,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except OSError as exc:
+            log.warning(f"[IPC] could not spawn triton ({exc}) — spoke down")
+            return
+        self.alive = True
+        self._pump = asyncio.create_task(self._pump_output())
+        log.info(f"[IPC] triton spoke live — pid {self.proc.pid} ({self.binary})")
+
+    async def _pump_output(self) -> None:
+        assert self.proc is not None and self.proc.stdout is not None
+        while True:
+            line = await self.proc.stdout.readline()
+            if not line:
+                break
+            log.info("[triton] %s", line.decode(errors="replace").rstrip())
+        # The spoke died — say so loudly. The chambers stay up and the
+        # voice is never blocked by it.
+        self.alive = False
+        log.error("[IPC] triton spoke exited — foresight unavailable until restart")
+
+    async def stop(self, exception: Exception | None = None) -> None:
+        self.alive = False
+        if self.proc is not None and self.proc.returncode is None:
+            self.proc.terminate()
+            try:
+                await asyncio.wait_for(self.proc.wait(), timeout=5)
+            except TimeoutError:
+                self.proc.kill()
+                await self.proc.wait()
+        self.proc = None
+        log.info("[IPC] triton spoke shut down cleanly")
+
+
 class VoicePoolService(Service):
     """Configures LINA's instruments (LLM providers) and publishes the pool.
 
@@ -2983,6 +3172,7 @@ def main() -> None:
             max_concurrent=max_concurrent,
         ),
         IPCBridgeService(tx_path=tx_path, rx_path=rx_path),
+        TritonService(binary=os.getenv("TRITON_BIN")),
         LINAIdentityService(host=host, port=port),
         # Her memory machinery — in the loop, hers to call (sovereignty).
         # The reflection cadence (8h) + trigger intake; db/cache resolve
@@ -3037,6 +3227,9 @@ def main() -> None:
             0,
             BrowserService(timeout=float(os.getenv("BROWSER_TIMEOUT", "15"))),
         )
+    # Her image sight — Gemini, in the loop. Dark until GEMINI_API_KEY is
+    # set; the tool says so honestly.
+    services.insert(0, VisionService())
 
     with entrypoint(*services) as loop:
         loop.run_forever()

@@ -15,15 +15,48 @@ from typing import Any, Callable
 from .base import AIProvider, VoicePoolError
 from .deepseek import DeepSeekProvider
 from .gemini import GeminiProvider
+from .openai_compat import OpenAICompatProvider
 from .openrouter import OpenRouterProvider
 
 log = logging.getLogger("lina.voice")
+
+
+class LocalVoiceProvider(OpenAICompatProvider):
+    """Her voice on her own machine — the engine as an instrument.
+
+    Reads ``LOCAL_VOICE_URL`` / ``LOCAL_VOICE_MODEL`` / ``LOCAL_VOICE_API_KEY``
+    (the key is a local dummy — the engine does not authenticate; the field
+    is kept because the contract requires it). The local instrument speaks
+    directly: ``enable_thinking=false`` keeps her words immediate — she is
+    an instruction follower; the polytope does the thinking.
+    """
+
+    name = "local"
+    label = "Local (this machine)"
+
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
+        super().__init__(
+            base_url=base_url or os.getenv("LOCAL_VOICE_URL") or "http://127.0.0.1:8081/v1",
+            api_key=api_key or os.getenv("LOCAL_VOICE_API_KEY") or "local",
+            model=model or os.getenv("LOCAL_VOICE_MODEL") or "qwen3-4b",
+            name=self.name,
+            label=self.label,
+            extra_payload={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+
 
 #: Well-known providers and their environment key names.
 PROVIDER_BUILDERS: dict[str, type[AIProvider]] = {
     "deepseek": DeepSeekProvider,
     "openrouter": OpenRouterProvider,
     "gemini": GeminiProvider,
+    "local": LocalVoiceProvider,
 }
 
 
@@ -80,6 +113,45 @@ class VoicePool:
                         log.info(f"[voice] fell back to {provider.name}")
                     return text
                 except Exception as exc:
+                    last_error = exc
+                    log.warning(f"[voice] {provider.name} failed: {exc}")
+                    if self._on_fallback is not None and index < len(self.providers) - 1:
+                        try:
+                            self._on_fallback(provider.name)
+                        except Exception:  # pragma: no cover - telemetry must never break the voice
+                            log.debug("[voice] telemetry hook failed", exc_info=True)
+
+        raise VoicePoolError(f"all voice providers failed: {last_error}") from last_error
+
+    async def generate_stream(
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> Any:
+        """Stream through the provider chain. Falls back on failure — but
+        only before the first chunk; once her words start flowing, a
+        mid-stream failure is surfaced, never silently re-voiced."""
+        if not self.providers:
+            raise VoicePoolError(
+                "no voice providers configured — set AI_PROVIDER and a "
+                "provider API key (e.g. DEEPSEEK_API_KEY)"
+            )
+
+        async with self._semaphore:
+            started = False
+            last_error: Exception | None = None
+            for index, provider in enumerate(self.providers):
+                try:
+                    async for chunk in provider.generate_stream(system, messages, **kwargs):
+                        started = True
+                        yield chunk
+                    return
+                except Exception as exc:
+                    if started:
+                        raise VoicePoolError(
+                            f"{provider.name} failed mid-stream: {exc}"
+                        ) from exc
                     last_error = exc
                     log.warning(f"[voice] {provider.name} failed: {exc}")
                     if self._on_fallback is not None and index < len(self.providers) - 1:

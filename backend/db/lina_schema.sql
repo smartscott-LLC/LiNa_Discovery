@@ -732,10 +732,11 @@ CREATE INDEX IF NOT EXISTS idx_mem_hemisphere ON lina_memory_items(hemisphere);
 CREATE INDEX IF NOT EXISTS idx_mem_importance ON lina_memory_items(importance_score DESC);
 CREATE INDEX IF NOT EXISTS idx_mem_last_ref   ON lina_memory_items(last_referenced_at DESC);
 
--- The likeness half of recall (MPS §5, Phase F). Dimension set by the
--- embedding model choice (EMBEDDING_DIMENSIONS, default 1536).
+-- The likeness half of recall (MPS §5, Phase F). Dimension follows the
+-- embedding model: the local semantic cortex (nomic-embed-text) is 768d.
+-- A cloud model (text-embedding-3-small, 1536d) would set this to 1536.
 ALTER TABLE lina_memory_items
-    ADD COLUMN IF NOT EXISTS embedding vector(1536);
+    ADD COLUMN IF NOT EXISTS embedding vector(768);
 
 CREATE INDEX IF NOT EXISTS idx_mem_embedding
     ON lina_memory_items USING hnsw (embedding vector_cosine_ops);

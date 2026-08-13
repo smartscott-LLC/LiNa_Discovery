@@ -92,7 +92,7 @@ def test_voice_pool_service_env_driven():
         ):
             pool = lina_service._context_get("voice_pool")
             assert pool is not None
-            assert pool.names == ["openrouter", "deepseek"], pool.names
+            assert pool.names == ["openrouter", "deepseek", "local"], pool.names
             assert pool.max_concurrent == 7
     asyncio.run(run())
 

@@ -1168,10 +1168,18 @@ class MemoryRecallService(Service):
                 # Lazy backfill: embed the narrative now, keep it for next time.
                 embedding = await self.embedder.embed(row["narrative"])
                 if embedding:
-                    await db.execute(
-                        "UPDATE lina_memory_items SET embedding = $2 WHERE item_id = $1",
-                        row["item_id"], _vector_literal(embedding),
-                    )
+                    try:
+                        await db.execute(
+                            "UPDATE lina_memory_items SET embedding = $2 WHERE item_id = $1",
+                            row["item_id"], _vector_literal(embedding),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - a failed backfill
+                        # must never break the turn — the likeness half is
+                        # auxiliary; the polytope mapping is primary.
+                        log.warning(
+                            f"[mps] embedding backfill failed ({exc}) — "
+                            "recall continues on importance + ethical proximity"
+                        )
             sem = cosine(query_embedding, embedding)
             eth = ethical_similarity(coords, ethical)
             importance = float(row.get("importance_score") or 0.0) / 10.0

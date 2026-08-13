@@ -1,6 +1,9 @@
 """OpenAI-compatible chat provider — the common base for DeepSeek,
-OpenRouter, and Gemini (all expose the `/chat/completions` contract)."""
+OpenRouter, and Gemini (all expose the `/chat/completions` contract).
+Streaming rides the same contract: ``stream: true`` and SSE ``data:``
+lines, which every one of them speaks."""
 
+import json
 import logging
 from typing import Any
 
@@ -31,11 +34,16 @@ class OpenAICompatProvider(AIProvider):
         name: str | None = None,
         label: str | None = None,
         timeout: float = 60.0,
+        extra_payload: dict[str, Any] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        #: Extra JSON merged into every request body (e.g. a provider's
+        #: template knobs). A local instrument uses this to keep its voice
+        #: direct — no chain-of-thought monologue.
+        self.extra_payload = extra_payload or {}
         if name:
             self.name = name
         if label:
@@ -68,6 +76,7 @@ class OpenAICompatProvider(AIProvider):
             "messages": payload_messages,
             "max_tokens": kwargs.get("max_tokens", 4096),
         }
+        payload.update(self.extra_payload)
         if "temperature" in kwargs:
             payload["temperature"] = kwargs["temperature"]
 
@@ -87,6 +96,57 @@ class OpenAICompatProvider(AIProvider):
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, ValueError) as exc:
             raise ProviderError(f"{self.name} returned an unparseable body") from exc
+
+    async def generate_stream(
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> Any:
+        """Stream the completion over SSE — chunks as they arrive."""
+        payload_messages: list[dict[str, Any]] = []
+        if system:
+            payload_messages.append({"role": "system", "content": system})
+        payload_messages.extend(messages)
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": payload_messages,
+            "max_tokens": kwargs.get("max_tokens", 4096),
+            "stream": True,
+        }
+        payload.update(self.extra_payload)
+        if "temperature" in kwargs:
+            payload["temperature"] = kwargs["temperature"]
+
+        try:
+            async with self._http.stream(
+                "POST", "/chat/completions", json=payload
+            ) as response:
+                if response.status_code >= 400:
+                    body = (await response.aread()).decode(errors="replace")
+                    raise ProviderError(
+                        f"{self.name} returned HTTP {response.status_code}: "
+                        f"{body[:300]}"
+                    )
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    try:
+                        delta = chunk["choices"][0]["delta"].get("content")
+                    except (KeyError, IndexError):
+                        delta = None
+                    if delta:
+                        yield delta
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"{self.name} stream failed: {exc}") from exc
 
     async def aclose(self) -> None:
         if self._client is not None:

@@ -113,8 +113,9 @@ def test_factory_env_chain():
 
     async def run():
         pool = build_voice_pool_from_env(primary="deepseek", max_concurrent=3)
-        # deepseek + openrouter have keys; gemini skipped
-        assert pool.names == ["deepseek", "openrouter"], pool.names
+        # deepseek + openrouter have keys; gemini skipped; local is always
+        # available — her voice lives on her own machine now.
+        assert pool.names == ["deepseek", "openrouter", "local"], pool.names
         assert pool.max_concurrent == 3
     asyncio.run(run())
 
@@ -134,7 +135,9 @@ def test_factory_no_keys_empty():
     os.environ.pop("AI_PROVIDERS", None)
     async def run():
         pool = build_voice_pool_from_env(primary="deepseek")
-        assert pool.names == [], pool.names
+        # The cloud providers need keys; the local instrument does not —
+        # she always has her own voice on this machine.
+        assert pool.names == ["local"], pool.names
     asyncio.run(run())
 
 
@@ -166,6 +169,48 @@ def test_openai_compat_request_shape():
         assert captured["json"]["max_tokens"] == 42
         assert captured["json"]["messages"][0] == {"role": "system", "content": "sys"}
         assert captured["json"]["messages"][1] == {"role": "user", "content": "q"}
+    asyncio.run(run())
+
+
+class ChunkProvider(FakeProvider):
+    """A provider that truly streams — pieces, not one assembled answer."""
+    async def generate_stream(self, system, messages, **kwargs):
+        if self.fail:
+            raise RuntimeError(f"{self.name} exploded")
+        for piece in self.responses:
+            yield piece
+
+
+def test_generate_stream_default_yields_once():
+    async def run():
+        pool = VoicePool([FakeProvider("a", responses=["whole answer"])])
+        chunks = [c async for c in pool.generate_stream("", [])]
+        assert chunks == ["whole answer"]
+    asyncio.run(run())
+
+
+def test_generate_stream_fallback_before_first_chunk():
+    async def run():
+        primary = ChunkProvider("deepseek", responses=["partial"], fail=True)
+        backup = ChunkProvider("openrouter", responses=["hello", " world"])
+        pool = VoicePool([primary, backup])
+        chunks = [c async for c in pool.generate_stream("", [])]
+        assert chunks == ["hello", " world"]
+    asyncio.run(run())
+
+
+def test_generate_stream_mid_stream_failure_surfaces():
+    class MidFailProvider(ChunkProvider):
+        async def generate_stream(self, system, messages, **kwargs):
+            yield "first"
+            raise RuntimeError(f"{self.name} died mid-word")
+    async def run():
+        pool = VoicePool([MidFailProvider("a"), ChunkProvider("b", responses=["never used"])])
+        try:
+            chunks = [c async for c in pool.generate_stream("", [])]
+            raise AssertionError(f"should have raised, got {chunks}")
+        except VoicePoolError as e:
+            assert "mid-stream" in str(e)
     asyncio.run(run())
 
 
