@@ -152,7 +152,7 @@ from mps import (
     reflect_messages,
 )
 from pydantic import BaseModel
-from speech import SpeechService
+from speech import MAX_STT_AUDIO_BYTES, SpeechService
 from tools import parse_tool_intents, process_tool_intents
 from vision import VisionService
 
@@ -2248,12 +2248,18 @@ async def speak(req: SpeakRequest):
 @app.post("/lina/speech/transcribe")
 async def transcribe(file: UploadFile = File(...)):
     """Her ears — audio in, the words she heard (text) out."""
-    client = _context_get("speech_client")
-    if client is None or not getattr(client, "available", False):
-        raise HTTPException(503, "her ears are not available — OPENROUTER_API_KEY is not set")
     audio = await file.read()
     if not audio:
         raise HTTPException(400, "no audio received")
+    if len(audio) > MAX_STT_AUDIO_BYTES:
+        raise HTTPException(
+            400,
+            f"that recording is too long for her to hear at once — "
+            f"{MAX_STT_AUDIO_BYTES} bytes is her context window",
+        )
+    client = _context_get("speech_client")
+    if client is None or not getattr(client, "available", False):
+        raise HTTPException(503, "her ears are not available — OPENROUTER_API_KEY is not set")
     mime = file.content_type or "audio/webm"
     text = await client.transcribe(audio, filename=file.filename or "lina.webm", mime=mime)
     if text is None:

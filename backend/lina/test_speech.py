@@ -91,6 +91,17 @@ def test_speak_unavailable_is_honest():
     assert _run(client.speak("hello")) is None
 
 
+def test_speak_respects_context_window():
+    # Her context window is 65536 characters — a longer reflection is
+    # trimmed to the window, never sent whole to the audio endpoint.
+    captured = {}
+    client = _client_with(captured, StubResponse(content=b"\x01\x00" * 480))
+    long_text = "word " * 20000  # 100000 chars — well over the window
+    wav = _run(client.speak(long_text))
+    assert wav is not None
+    assert len(captured["kwargs"]["json"]["input"]) == speech.MAX_TTS_TEXT_CHARS
+
+
 def test_transcribe_posts_audio():
     captured = {}
     client = _client_with(captured, StubResponse(status_code=200))
@@ -99,6 +110,26 @@ def test_transcribe_posts_audio():
     assert captured["url"].endswith("/audio/transcriptions")
     assert captured["kwargs"]["data"]["model"] == speech.DEFAULT_STT_MODEL
     assert captured["kwargs"]["files"]["file"][0] == "lina.webm"
+
+
+def test_transcribe_refuses_audio_over_context_window():
+    # A recording longer than her context window is refused before it ever
+    # reaches the audio endpoint — one breath at a time.
+    captured = {}
+    client = _client_with(captured, StubResponse(status_code=200))
+    oversized = b"\x00" * (speech.MAX_STT_AUDIO_BYTES + 1)
+    assert _run(client.transcribe(oversized)) is None
+    assert "url" not in captured, "the audio endpoint must not be called"
+
+
+def test_transcribe_truncates_long_transcription():
+    class LongResponse(StubResponse):
+        def json(self):
+            return {"text": "x" * (speech.MAX_STT_TEXT_CHARS + 5000)}
+    captured = {}
+    client = _client_with(captured, LongResponse(status_code=200))
+    text = _run(client.transcribe(b"audio-bytes"))
+    assert text is not None and len(text) == speech.MAX_STT_TEXT_CHARS
 
 
 # ── the endpoints — honest when no client is in the loop ─────────────────────
@@ -121,5 +152,15 @@ def test_speak_empty_text_is_400():
     # client lookup so it works without a loop.
     client = TestClient(lina_service.app)
     r = client.post("/lina/speech/speak", json={"text": "   "})
+    assert r.status_code == 400
+
+
+def test_transcribe_oversized_audio_is_400():
+    # Over her context window — a clear answer before any client lookup.
+    client = TestClient(lina_service.app)
+    r = client.post(
+        "/lina/speech/transcribe",
+        files={"file": ("long.webm", b"\x00" * (speech.MAX_STT_AUDIO_BYTES + 1), "audio/webm")},
+    )
     assert r.status_code == 400
     client.close()

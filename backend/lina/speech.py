@@ -35,6 +35,15 @@ DEFAULT_TTS_MODEL = "hexgrad/kokoro-82m"
 DEFAULT_STT_MODEL = "openai/whisper-1"
 DEFAULT_VOICE = "bf_lily"
 
+# Her context window for the speech instruments — the words she may speak
+# in one breath and the words she may hear at once. 65536 characters is a
+# long reflection; a recording that long in compressed audio is a breath of
+# speech, not a monologue. The bounds keep a runaway input from ever
+# hammering the audio endpoints.
+MAX_TTS_TEXT_CHARS = 65536       # the text she is given to speak
+MAX_STT_AUDIO_BYTES = 65536      # the audio she is given to hear
+MAX_STT_TEXT_CHARS = 65536       # the words she hears transcribed
+
 
 def pcm_to_wav(pcm: bytes, rate: int = 24000, channels: int = 1, bits: int = 16) -> bytes:
     """Wrap raw PCM samples in a WAV container the browser can play.
@@ -93,6 +102,12 @@ class SpeechClient:
         text = (text or "").strip()
         if not text or not self.available:
             return None
+        if len(text) > MAX_TTS_TEXT_CHARS:
+            log.warning(
+                f"[speech] text of {len(text)} chars exceeds her context window "
+                f"({MAX_TTS_TEXT_CHARS}) — she will speak the first {MAX_TTS_TEXT_CHARS}"
+            )
+            text = text[:MAX_TTS_TEXT_CHARS]
         try:
             client = self._get_client()
             resp = await client.post(
@@ -121,6 +136,12 @@ class SpeechClient:
         """Her ears — audio in, words out. None on failure."""
         if not audio or not self.available:
             return None
+        if len(audio) > MAX_STT_AUDIO_BYTES:
+            log.warning(
+                f"[speech] {len(audio)} bytes of audio exceeds her context window "
+                f"({MAX_STT_AUDIO_BYTES}) — she cannot hear it all at once"
+            )
+            return None
         try:
             client = self._get_client()
             resp = await client.post(
@@ -130,7 +151,14 @@ class SpeechClient:
                 headers={"Authorization": f"Bearer {self.api_key}"},
             )
             resp.raise_for_status()
-            return (resp.json().get("text") or "").strip()
+            text = (resp.json().get("text") or "").strip()
+            if len(text) > MAX_STT_TEXT_CHARS:
+                log.warning(
+                    f"[speech] transcription of {len(text)} chars exceeds her context "
+                    f"window ({MAX_STT_TEXT_CHARS}) — keeping the first {MAX_STT_TEXT_CHARS}"
+                )
+                return text[:MAX_STT_TEXT_CHARS]
+            return text
         except Exception as exc:
             log.warning(f"[speech] listen failed ({exc}) — she could not hear that")
             return None
