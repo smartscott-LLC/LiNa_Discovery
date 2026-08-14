@@ -117,11 +117,11 @@ class VoicePool:
                             f"{provider.name} returned an empty completion"
                         )
                     if provider is not self.providers[0]:
-                        log.info(f"[voice] fell back to {provider.name}")
+                        log.info(f"[model] fell back to {provider.name}")
                     return text
                 except Exception as exc:
                     last_error = exc
-                    log.warning(f"[voice] {provider.name} failed: {exc}")
+                    log.warning(f"[model] {provider.name} failed: {exc}")
                     if self._on_fallback is not None and index < len(self.providers) - 1:
                         try:
                             self._on_fallback(provider.name)
@@ -167,7 +167,7 @@ class VoicePool:
                             f"{provider.name} failed mid-stream: {exc}"
                         ) from exc
                     last_error = exc
-                    log.warning(f"[voice] {provider.name} failed: {exc}")
+                    log.warning(f"[model] {provider.name} failed: {exc}")
                     if self._on_fallback is not None and index < len(self.providers) - 1:
                         try:
                             self._on_fallback(provider.name)

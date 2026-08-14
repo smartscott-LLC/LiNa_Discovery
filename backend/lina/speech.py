@@ -21,6 +21,7 @@ Environment:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import struct
@@ -78,7 +79,7 @@ class SpeechClient:
         stt_model: str | None = None,
         voice: str | None = None,
         api_key: str | None = None,
-        timeout: float = 180.0,
+        timeout: float = 600.0,
     ) -> None:
         provider = (os.getenv("SPEECH_PROVIDER") or "openrouter").strip().lower()
         self.base_url = (
@@ -98,7 +99,11 @@ class SpeechClient:
         return bool(self.api_key)
 
     async def speak(self, text: str, *, voice: str | None = None) -> bytes | None:
-        """Her words, made audible — raw PCM wrapped in WAV. None on failure."""
+        """Her words, made audible — raw PCM wrapped in WAV. None on failure.
+
+        One retry on a transient failure: a cloud mouth that stumbles once
+        should not leave her silent when a second try would carry her words.
+        """
         text = (text or "").strip()
         if not text or not self.available:
             return None
@@ -108,29 +113,36 @@ class SpeechClient:
                 f"({MAX_TTS_TEXT_CHARS}) — she will speak the first {MAX_TTS_TEXT_CHARS}"
             )
             text = text[:MAX_TTS_TEXT_CHARS]
-        try:
-            client = self._get_client()
-            resp = await client.post(
-                f"{self.base_url}/audio/speech",
-                json={
-                    "model": self.tts_model,
-                    "input": text,
-                    "voice": voice or self.voice,
-                },
-                headers={"Authorization": f"Bearer {self.api_key}"},
-            )
-            resp.raise_for_status()
-            content_type = resp.headers.get("content-type", "")
-            rate = 24000
-            if "rate=" in content_type:
-                try:
-                    rate = int(content_type.split("rate=")[1].split(";")[0])
-                except (IndexError, ValueError):
-                    rate = 24000
-            return pcm_to_wav(resp.content, rate=rate)
-        except Exception as exc:
-            log.warning(f"[speech] speak failed ({exc}) — she is silent this once")
-            return None
+        for attempt in (1, 2):
+            try:
+                client = self._get_client()
+                resp = await client.post(
+                    f"{self.base_url}/audio/speech",
+                    json={
+                        "model": self.tts_model,
+                        "input": text,
+                        "voice": voice or self.voice,
+                    },
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+                resp.raise_for_status()
+                content_type = resp.headers.get("content-type", "")
+                rate = 24000
+                if "rate=" in content_type:
+                    try:
+                        rate = int(content_type.split("rate=")[1].split(";")[0])
+                    except (IndexError, ValueError):
+                        rate = 24000
+                return pcm_to_wav(resp.content, rate=rate)
+            except Exception as exc:
+                log.warning(
+                    f"[speech] speak attempt {attempt} failed "
+                    f"({type(exc).__name__}: {exc}) — she is silent this once"
+                )
+                if attempt == 2:
+                    return None
+                await asyncio.sleep(1.0)
+        return None
 
     async def transcribe(self, audio: bytes, *, filename: str = "lina.wav", mime: str = "audio/wav") -> str | None:
         """Her ears — audio in, words out. None on failure."""
