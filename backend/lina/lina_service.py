@@ -3586,9 +3586,13 @@ def main() -> None:
             0,
             BrowserService(timeout=float(os.getenv("BROWSER_TIMEOUT", "15"))),
         )
-    # Her ears and her audible voice — in the loop. Dark until the speech
-    # key is set; the endpoints say so honestly.
-    services.insert(0, SpeechService())
+    # Her ears and her audible voice — in the loop while she has them.
+    # With SPEECH_PROVIDER=none she is text-only by design, and the speech
+    # instrument is not even created — no client object, nothing reserved;
+    # the endpoints still answer honestly that her voice is not available.
+    if (os.getenv("SPEECH_PROVIDER", "openrouter").strip().lower()
+            not in ("none", "off", "disabled")):
+        services.insert(0, SpeechService())
     # Her image sight — Gemini, in the loop. Dark until GEMINI_API_KEY is
     # set; the tool says so honestly.
     services.insert(0, VisionService())
