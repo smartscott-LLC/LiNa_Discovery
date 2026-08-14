@@ -5,18 +5,21 @@ speaks (LLM), and now she can be *heard* (TTS). This module is the speech
 instrument — an OpenAI-compatible audio client, stateless like the vision
 client, wrapped in a service so it lives in the loop.
 
-OpenRouter's audio endpoints return raw PCM for kokoro TTS, so this module
-wraps the samples in a WAV container for the browser. The local phase
-(kokoro via llama.cpp, whisper via whisper.cpp — both on the iGPU) will
-swap the base URL and models; the client contract stays.
+Her mouth and ears live on her own machine now: the TTS gateway
+(``llama-tts`` + Qwen3-TTS) and the whisper instrument, reached over the
+same OpenAI-compatible contract the cloud spoke. Cloud endpoints return
+raw PCM for kokoro TTS, so this module wraps the samples in a WAV
+container for the browser; the local gateway returns PCM the same way.
 
 Environment:
-    SPEECH_PROVIDER   — speech provider name (default: openrouter)
-    SPEECH_BASE_URL   — optional endpoint override (default: OpenRouter /api/v1)
+    SPEECH_PROVIDER   — speech provider name (local | openrouter)
+    SPEECH_BASE_URL   — fallback endpoint for both instruments
+    TTS_BASE_URL      — her mouth's endpoint (default: SPEECH_BASE_URL)
+    STT_BASE_URL      — her ears' endpoint (default: SPEECH_BASE_URL)
     TTS_MODEL         — text-to-speech model (default: hexgrad/kokoro-82m)
     STT_MODEL         — speech-to-text model (default: openai/whisper-1)
-    SPEECH_VOICE      — default TTS voice (default: af_heart)
-    OPENROUTER_API_KEY — the key the audio endpoints authenticate with
+    SPEECH_VOICE      — default TTS voice (default: bf_lily)
+    OPENROUTER_API_KEY — the key the cloud audio endpoints authenticate with
 """
 
 from __future__ import annotations
@@ -75,18 +78,23 @@ class SpeechClient:
         self,
         *,
         base_url: str | None = None,
+        tts_base_url: str | None = None,
+        stt_base_url: str | None = None,
         tts_model: str | None = None,
         stt_model: str | None = None,
         voice: str | None = None,
         api_key: str | None = None,
+        provider: str | None = None,
         timeout: float = 600.0,
     ) -> None:
-        provider = (os.getenv("SPEECH_PROVIDER") or "openrouter").strip().lower()
+        self.provider = (provider or os.getenv("SPEECH_PROVIDER") or "openrouter").strip().lower()
         self.base_url = (
-            base_url
-            or os.getenv("SPEECH_BASE_URL")
-            or (DEFAULT_BASE_URL if provider == "openrouter" else DEFAULT_BASE_URL)
+            base_url or os.getenv("SPEECH_BASE_URL") or DEFAULT_BASE_URL
         ).rstrip("/")
+        # Her mouth and ears may live on different instruments (both local
+        # now); each falls back to the shared base URL when unset.
+        self.tts_base_url = (tts_base_url or os.getenv("TTS_BASE_URL") or self.base_url).rstrip("/")
+        self.stt_base_url = (stt_base_url or os.getenv("STT_BASE_URL") or self.base_url).rstrip("/")
         self.tts_model = tts_model or os.getenv("TTS_MODEL") or DEFAULT_TTS_MODEL
         self.stt_model = stt_model or os.getenv("STT_MODEL") or DEFAULT_STT_MODEL
         self.voice = voice or os.getenv("SPEECH_VOICE") or DEFAULT_VOICE
@@ -96,6 +104,10 @@ class SpeechClient:
 
     @property
     def available(self) -> bool:
+        # On her own machine her mouth and ears are always present; the
+        # cloud instruments need a key.
+        if self.provider == "local":
+            return True
         return bool(self.api_key)
 
     async def speak(self, text: str, *, voice: str | None = None) -> bytes | None:
@@ -117,7 +129,7 @@ class SpeechClient:
             try:
                 client = self._get_client()
                 resp = await client.post(
-                    f"{self.base_url}/audio/speech",
+                    f"{self.tts_base_url}/audio/speech",
                     json={
                         "model": self.tts_model,
                         "input": text,
@@ -157,7 +169,7 @@ class SpeechClient:
         try:
             client = self._get_client()
             resp = await client.post(
-                f"{self.base_url}/audio/transcriptions",
+                f"{self.stt_base_url}/audio/transcriptions",
                 data={"model": self.stt_model},
                 files={"file": (filename, audio, mime)},
                 headers={"Authorization": f"Bearer {self.api_key}"},
@@ -198,13 +210,15 @@ class SpeechService(Service):
         self.context["speech_client"] = self.client
         if self.client.available:
             log.info(
-                f"[speech] her voice and ears are live — tts {self.client.tts_model}, "
-                f"stt {self.client.stt_model}"
+                f"[speech] her voice and ears are live — tts {self.client.tts_model} "
+                f"via {self.client.tts_base_url}, stt {self.client.stt_model} "
+                f"via {self.client.stt_base_url}"
             )
         else:
             log.warning(
-                "[speech] her voice and ears are dark — OPENROUTER_API_KEY is not set; "
-                "the speech endpoints will say so honestly"
+                "[speech] her voice and ears are dark — no local instruments and "
+                "OPENROUTER_API_KEY is not set; the speech endpoints will say so "
+                "honestly"
             )
 
     async def stop(self, exception: Exception | None = None) -> None:

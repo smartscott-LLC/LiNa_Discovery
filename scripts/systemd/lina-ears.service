@@ -1,0 +1,28 @@
+# LINA — her ears, a local instrument (whisper.cpp gateway).
+#
+# Install:  sudo cp scripts/systemd/lina-ears.service /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now lina-ears.service
+#
+# Serves her service's OpenAI-compatible /audio/transcriptions at 127.0.0.1:8083.
+
+[Unit]
+Description=LINA Ears — her hearing (whisper gateway)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=server
+Group=server
+WorkingDirectory=/home/server/LiNa_Discovery/backend/lina
+EnvironmentFile=/home/server/LiNa_Discovery/.env
+ExecStart=/home/server/LiNa_Discovery/.venv/bin/python -m uvicorn stt_gateway:app --host 127.0.0.1 --port 8083
+Restart=on-failure
+RestartSec=3
+# Her instruments never swap.
+MemorySwapMax=0
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
