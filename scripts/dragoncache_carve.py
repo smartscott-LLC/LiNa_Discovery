@@ -120,26 +120,23 @@ def carve(size: int, psize: int) -> None:
     mapping.flush()
 
 
-#: hugetlbfs rejects unaligned write(); the weights are copied via mmap —
-#: the same path she will use to live on them.
-_WEIGHTS_DST = "/mnt/huge/Qwen3-4B-Q4_K_M.gguf"
-
-
 def place_weights(source: str) -> None:
     """Copy the GGUF onto the carve, padded to the 2MB boundary, written
     via mmap (aligned writes are the only writes hugetlbfs accepts).
-    Idempotent: a complete copy is left alone."""
+    Idempotent: a complete copy is left alone. The destination follows the
+    source file's name, so any model can live on the table."""
     src = os.path.realpath(source)
     if not os.path.isfile(src):
         print(f"[carve] weights source not found: {src}")
         return
+    dst = os.path.join(HUGETLBFS, os.path.basename(src))
     size = os.path.getsize(src)
-    if os.path.exists(_WEIGHTS_DST) and os.path.getsize(_WEIGHTS_DST) >= size:
-        print(f"[carve] weights already on the carve ({_WEIGHTS_DST})")
+    if os.path.exists(dst) and os.path.getsize(dst) >= size:
+        print(f"[carve] weights already on the carve ({dst})")
         return
     CHUNK = 2 * 1024 * 1024
     padded = ((size + CHUNK - 1) // CHUNK) * CHUNK
-    fd = os.open(_WEIGHTS_DST, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(dst, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
     os.ftruncate(fd, padded)
     mapping = mmap.mmap(fd, padded, mmap.MAP_SHARED)
     os.close(fd)
@@ -151,7 +148,7 @@ def place_weights(source: str) -> None:
             offset += len(block)
     mapping.flush()
     mapping.close()
-    print(f"[carve] weights on the carve: {padded / 1e9:.2f} GB at {_WEIGHTS_DST}")
+    print(f"[carve] weights on the carve: {padded / 1e9:.2f} GB at {dst}")
 
 
 def release() -> None:

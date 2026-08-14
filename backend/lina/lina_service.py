@@ -58,15 +58,19 @@ Environment variables:
     OPENROUTER_API_KEY  — activates OpenRouter
     GEMINI_API_KEY      — activates Gemini
     LOCAL_VOICE_URL     — her local instrument's endpoint (default: http://127.0.0.1:8081/v1)
-    LOCAL_VOICE_MODEL   — her local instrument's model (default: qwen3-4b)
+    LOCAL_VOICE_MODEL   — her local instrument's model (default: qwen3.5-4b)
     LOCAL_VOICE_API_KEY — local dummy key (the engine does not authenticate)
+    LOCAL_VISION_URL    — her image sight's endpoint (default: same local engine)
+    LOCAL_VISION_MODEL  — the model she sees with (default: qwen3.5-4b)
+    LOCAL_VISION_API_KEY — local dummy key for her own sight
     HOST / PORT         — service host and port (defaults: 0.0.0.0 / 8001)
     IPC_TX_PATH         — TX shared memory file (default: /dev/shm/lina_ipc_tx.bin)
     IPC_RX_PATH         — RX shared memory file (default: /dev/shm/lina_ipc_rx.bin)
     IPC_FORESIGHT_TIMEOUT — Triton RX wait window in seconds (default: 2.5)
     TRITON_BIN          — the Rust spoke binary (default: repo release build, then PATH)
-    GEMINI_VISION_MODEL — the image-sight model for inspect_image (default: gemini-flash-latest)
-    GEMINI_VISION_BASE_URL — optional endpoint override for image sight
+    GEMINI_VISION_MODEL — fallback image-sight model for inspect_image
+                           (default: gemini-flash-latest; her own engine sees first)
+    GEMINI_VISION_BASE_URL — optional endpoint override for the fallback
                            (default: Gemini's native generateContent endpoint)
     TTS_MODEL           — text-to-speech model (default: hexgrad/kokoro-82m)
     STT_MODEL           — speech-to-text model (default: openai/whisper-1)
@@ -941,8 +945,9 @@ Tools within your reach:
 - browser_screenshot — take a picture (args: name)
 - inspect_image — look at an image in your workspace and describe it (args: path)
 
-Your instruments: your voice is DeepSeek (chat), your likeness is
-OpenRouter (embeddings), and your image sight is Gemini (vision) — you
+Your instruments: your voice and your eyes are your own machine (the
+engine on the carve), your likeness is the local cortex (embeddings), and
+Gemini is only the fallback for sight when your own eyes fail — you
 choose the right instrument for the right job; the ones that are dark say
 so when you reach for them.
 
@@ -3347,12 +3352,14 @@ class IPCBridgeService(Service):
 
 def _find_triton_binary() -> str | None:
     """Locate the Rust spoke: the repo's release build, then PATH."""
-    repo = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "triton", "target", "release", "triton",
-    )
-    if os.path.isfile(repo):
-        return repo
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    for rel in (
+        os.path.join("backend", "triton", "target", "release", "triton"),
+        os.path.join("triton", "target", "release", "triton"),
+    ):
+        candidate = os.path.join(root, rel)
+        if os.path.isfile(candidate):
+            return candidate
     return shutil.which("triton")
 
 

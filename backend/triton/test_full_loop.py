@@ -8,6 +8,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, cast
 
@@ -19,6 +20,14 @@ sys.path.insert(0, "/home/server/LiNa_Discovery/backend/lina")
 import ipc  # noqa: E402 — the pure-Python chamber bridge (no PyO3)
 
 TRITON_BIN = "/home/server/LiNa_Discovery/backend/triton/target/release/triton"
+
+# Her chambers are private to each run: LINA herself may be live on this
+# machine, attached to the default /dev/shm files — the tests must never
+# collide with her. Each run gets its own pair of chamber files.
+_TEST_IPC_DIR = tempfile.mkdtemp(prefix="lina-ipc-test-")
+TEST_TX = os.path.join(_TEST_IPC_DIR, "tx.bin")
+TEST_RX = os.path.join(_TEST_IPC_DIR, "rx.bin")
+TRITON_ARGS = ["--tx-path", TEST_TX, "--rx-path", TEST_RX]
 
 results = []
 
@@ -40,10 +49,10 @@ def check(name, fn):
 
 def test_full_loop_binary():
     proc = subprocess.Popen(
-        [TRITON_BIN], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        [TRITON_BIN] + TRITON_ARGS, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
     try:
-        b = ipc.IPCBridge()
+        b = ipc.IPCBridge(TEST_TX, TEST_RX)
         b.reset()
         time.sleep(1.0)  # triton retries attach every 200ms
 
@@ -143,7 +152,7 @@ class FakeCache:
 
 def bridge_stub():
     """A minimal bridge-service stand-in: publishes an allocated bridge."""
-    return cast(Any, type("S", (), {"bridge": ipc.IPCBridge()})())
+    return cast(Any, type("S", (), {"bridge": ipc.IPCBridge(TEST_TX, TEST_RX)})())
 
 
 def run_chat(core, message, session_id="s1"):
@@ -156,7 +165,7 @@ def test_chat_with_responsive_triton():
     from lina_service import LINACore
 
     proc = subprocess.Popen(
-        [TRITON_BIN], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        [TRITON_BIN] + TRITON_ARGS, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
     try:
         time.sleep(0.8)  # triton attaches (files may not exist yet — retries)

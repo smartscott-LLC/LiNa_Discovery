@@ -1,3 +1,12 @@
+# LINA's databases — the only containers she keeps, because they are
+# infrastructure, not her. LINA herself is native on this machine: she runs
+# as `lina.service` (systemd) straight from the repo, on the same hardware
+# as her voice engine, her cortex, and the DragonCache carve. Her state
+# lives in <repo>/runtime, her logs at <repo>/runtime/logs, her desk at
+# <repo>/runtime/workspace — all on the host, all hers.
+#
+#   docker compose up -d          # brings up postgres + dragonfly only
+#   sudo systemctl start lina    # brings up LINA herself
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -50,96 +59,7 @@ services:
       timeout: 5s
       retries: 5
 
-  lina:
-    build:
-      context: .
-      dockerfile: backend/lina/Dockerfile
-    container_name: collabsmart-lina
-    environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-collabsmart}:${POSTGRES_PASSWORD:-collabsmart}@postgres:5432/${POSTGRES_DB:-collabsmart}
-      - REDIS_URL=redis://:${DRAGONFLY_PASSWORD:-collabsmart}@dragonfly:6379
-      # LINA's voice — provider-agnostic, defaulting to her own machine.
-      # The local engine (llama.cpp on this host) is the primary instrument;
-      # DeepSeek/OpenRouter/Gemini remain the fallback chain for the week.
-      - AI_PROVIDER=${AI_PROVIDER:-local}
-      - AI_PROVIDERS=${AI_PROVIDERS:-local,deepseek,openrouter}
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      # Her voice on the host — the local engine (LOCAL_VOICE_API_KEY is a
-      # local dummy; the engine does not authenticate).
-      - LOCAL_VOICE_URL=${LOCAL_VOICE_URL:-http://host.docker.internal:8081/v1}
-      - LOCAL_VOICE_MODEL=${LOCAL_VOICE_MODEL:-qwen3-4b}
-      - LOCAL_VOICE_API_KEY=${LOCAL_VOICE_API_KEY:-local}
-      # The likeness half of recall (Phase F) — embeddings via the local
-      # semantic cortex on the host; falls back to importance + ethical
-      # proximity when it is down.
-      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-http://host.docker.internal:8080/v1}
-      - EMBEDDING_BASE_MODEL=${EMBEDDING_BASE_MODEL:-nomic-embed-text}
-      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-local}
-      # Service configuration.
-      - HOST=0.0.0.0
-      - PORT=8001
-      - IPC_FORESIGHT_TIMEOUT=${IPC_FORESIGHT_TIMEOUT:-2.5}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - LINA_MAX_TOKENS=${LINA_MAX_TOKENS:-4096}
-      - LINA_VOICE_MAX_CONCURRENT=${LINA_VOICE_MAX_CONCURRENT:-4}
-      # Her desk inside the container (state + PWA shell + theme).
-      - LINA_STATE_DIR=/app/runtime
-      - PWA_DIR=/app/pwa
-      - ASSETS_DIR=/app/assets
-      - WORKSPACE_PATH=/workspace
-      # Her reach — the rooms inside her body. The container is her home;
-      # these are the places she may touch, always behind the counsel ledger
-      # (and on her own in Winter). /app is her home and its logs; /app/runtime
-      # is her state; /workspace is her desk.
-      - LINA_ACCESS_ROOTS=/workspace:/app/runtime:/app
-      - BROWSER_TIMEOUT=${BROWSER_TIMEOUT:-15}
-      - TRITON_BIN=${TRITON_BIN:-/usr/local/bin/triton}
-      - GEMINI_VISION_MODEL=${GEMINI_VISION_MODEL:-gemini-flash-latest}
-      # Her ears and her audible voice (TTS/STT via OpenRouter for now;
-      # the local kokoro/whisper phase swaps the base URL and models).
-      - TTS_MODEL=${TTS_MODEL:-hexgrad/kokoro-82m}
-      - STT_MODEL=${STT_MODEL:-openai/whisper-1}
-      - SPEECH_VOICE=${SPEECH_VOICE:-af_heart}
-      - SPEECH_BASE_URL=${SPEECH_BASE_URL:-}
-      # Optional services (opt-in).
-      - METRICS_ENABLED=${METRICS_ENABLED:-0}
-      - HEARTBEAT_ENABLED=${HEARTBEAT_ENABLED:-0}
-    ports:
-      - "8001:8001"
-    extra_hosts:
-      # The host is her home — the container reaches her engines on it.
-      - "host.docker.internal:host-gateway"
-    networks:
-      - collabsmart
-    depends_on:
-      postgres:
-        condition: service_healthy
-      dragonfly:
-        condition: service_healthy
-    restart: unless-stopped
-    volumes:
-      # Actions approved through the HITL ledger execute here — her shared
-      # workspace, where her files live.
-      - workspace:/workspace
-      # The DragonCache — the pinned 4GiB pool on huge pages, read-only so
-      # her service can report its governance (the table's status).
-      - /mnt/huge:/mnt/huge:ro
-      # Live design surface: your theme and the shell mount read-only from
-      # the host, so color and UI edits appear without a rebuild (the image
-      # still bakes defaults for deployment).
-      - ./assets:/app/assets:ro
-      - ./backend/pwa:/app/pwa:ro
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/lina/health')"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-
 volumes:
-  workspace:
-    driver: local
   postgres_data:
     driver: local
   dragonfly_data:

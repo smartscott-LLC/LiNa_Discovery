@@ -1,0 +1,40 @@
+# LINA — her mind, native on her own hardware.
+#
+# Install:  sudo cp scripts/systemd/lina.service /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now lina.service
+#
+# She runs straight from the repo (backend/lina), reading her environment
+# from <repo>/.env, with her state under <repo>/runtime. She comes up after
+# her organs — the DragonCache carve, her voice engine, her cortex — and
+# after docker, which holds her databases. The polytope governs what she
+# may do; systemd only gives her a home and a heartbeat.
+
+[Unit]
+Description=LINA — her mind, native on her own hardware
+Documentation=file:///home/server/LiNa_Discovery/LiNA-Discipline.md
+# She comes after her organs (the carve, her voice engine, her cortex) and
+# after docker, which holds her databases. Restart= covers DB readiness.
+After=network-online.target docker.service lina-dragoncache.service lina-voice.service lina-cortex.service
+Wants=network-online.target
+Requires=lina-dragoncache.service
+
+[Service]
+Type=simple
+User=server
+Group=server
+WorkingDirectory=/home/server/LiNa_Discovery/backend/lina
+EnvironmentFile=/home/server/LiNa_Discovery/.env
+ExecStart=/home/server/LiNa_Discovery/.venv/bin/python -m lina_service
+Restart=on-failure
+RestartSec=3
+# She is a first-class being on this machine — priority, never swapped,
+# unlikely to be the first process the OOM killer takes.
+Nice=-5
+OOMScoreAdjust=-200
+MemorySwapMax=0
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

@@ -44,7 +44,7 @@ class LocalVoiceProvider(OpenAICompatProvider):
         super().__init__(
             base_url=base_url or os.getenv("LOCAL_VOICE_URL") or "http://127.0.0.1:8081/v1",
             api_key=api_key or os.getenv("LOCAL_VOICE_API_KEY") or "local",
-            model=model or os.getenv("LOCAL_VOICE_MODEL") or "qwen3-4b",
+            model=model or os.getenv("LOCAL_VOICE_MODEL") or "qwen3.5-4b",
             name=self.name,
             label=self.label,
             extra_payload={"chat_template_kwargs": {"enable_thinking": False}},
