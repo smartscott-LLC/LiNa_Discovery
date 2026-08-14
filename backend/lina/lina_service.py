@@ -156,7 +156,7 @@ from mps import (
     reflect_messages,
 )
 from pydantic import BaseModel
-from speech import MAX_STT_AUDIO_BYTES, SpeechService
+from speech import MAX_STT_AUDIO_BYTES, SpeechError, SpeechService
 from tools import parse_tool_intents, process_tool_intents
 from vision import VisionService
 
@@ -2259,14 +2259,16 @@ async def transcribe(file: UploadFile = File(...)):
     if len(audio) > MAX_STT_AUDIO_BYTES:
         raise HTTPException(
             400,
-            f"that recording is too long for her to hear at once — "
-            f"{MAX_STT_AUDIO_BYTES} bytes is her context window",
+            "that recording is too large for her to receive in one upload",
         )
     client = _context_get("speech_client")
     if client is None or not getattr(client, "available", False):
-        raise HTTPException(503, "her ears are not available — OPENROUTER_API_KEY is not set")
+        raise HTTPException(503, "her ears are not available — no local instruments and OPENROUTER_API_KEY is not set")
     mime = file.content_type or "audio/webm"
-    text = await client.transcribe(audio, filename=file.filename or "lina.webm", mime=mime)
+    try:
+        text = await client.transcribe(audio, filename=file.filename or "lina.webm", mime=mime)
+    except SpeechError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from None
     if text is None:
         raise HTTPException(502, "she could not hear that")
     return {"text": text}

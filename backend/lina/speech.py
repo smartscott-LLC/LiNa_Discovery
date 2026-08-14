@@ -41,11 +41,13 @@ DEFAULT_VOICE = "bf_lily"
 
 # Her context window for the speech instruments — the words she may speak
 # in one breath and the words she may hear at once. 65536 characters is a
-# long reflection; a recording that long in compressed audio is a breath of
-# speech, not a monologue. The bounds keep a runaway input from ever
-# hammering the audio endpoints.
+# long reflection, and a recording that long in compressed audio is a
+# breath of speech, not a monologue. The text bounds stay; the audio byte
+# gate is a coarse upload bound (the old 64 KiB belonged to the cloud era,
+# where every byte cost money — her own ears on this machine listen in
+# bounded breaths instead, measured in seconds, at the gateway).
 MAX_TTS_TEXT_CHARS = 65536       # the text she is given to speak
-MAX_STT_AUDIO_BYTES = 65536      # the audio she is given to hear
+MAX_STT_AUDIO_BYTES = int(os.getenv("STT_MAX_AUDIO_BYTES", str(4 * 1024 * 1024)))  # coarse upload gate
 MAX_STT_TEXT_CHARS = 65536       # the words she hears transcribed
 
 
@@ -68,6 +70,17 @@ def pcm_to_wav(pcm: bytes, rate: int = 24000, channels: int = 1, bits: int = 16)
         + struct.pack("<I", len(pcm))
     )
     return header + pcm
+
+
+class SpeechError(Exception):
+    """A refusal from a speech instrument — carries the status and reason
+    so her endpoints can say honestly why, instead of a generic silence.
+    (Too-long recordings, unparseable audio: the user can act on these.)"""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
 
 
 class SpeechClient:
@@ -157,13 +170,15 @@ class SpeechClient:
         return None
 
     async def transcribe(self, audio: bytes, *, filename: str = "lina.wav", mime: str = "audio/wav") -> str | None:
-        """Her ears — audio in, words out. None on failure."""
+        """Her ears — audio in, words out. None on failure; a refusal from
+        the instrument (too long, unparseable) raises SpeechError with the
+        reason, so her endpoint can say why honestly."""
         if not audio or not self.available:
             return None
         if len(audio) > MAX_STT_AUDIO_BYTES:
             log.warning(
-                f"[speech] {len(audio)} bytes of audio exceeds her context window "
-                f"({MAX_STT_AUDIO_BYTES}) — she cannot hear it all at once"
+                f"[speech] {len(audio)} bytes of audio exceeds her upload gate "
+                f"({MAX_STT_AUDIO_BYTES}) — she cannot receive it all at once"
             )
             return None
         try:
@@ -174,7 +189,13 @@ class SpeechClient:
                 files={"file": (filename, audio, mime)},
                 headers={"Authorization": f"Bearer {self.api_key}"},
             )
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                detail = f"the instrument answered {resp.status_code}"
+                try:
+                    detail = resp.json().get("detail") or detail
+                except Exception:  # noqa: BLE001 - a body is optional
+                    pass
+                raise SpeechError(resp.status_code, detail)
             text = (resp.json().get("text") or "").strip()
             if len(text) > MAX_STT_TEXT_CHARS:
                 log.warning(
@@ -183,6 +204,8 @@ class SpeechClient:
                 )
                 return text[:MAX_STT_TEXT_CHARS]
             return text
+        except SpeechError:
+            raise
         except Exception as exc:
             log.warning(f"[speech] listen failed ({exc}) — she could not hear that")
             return None

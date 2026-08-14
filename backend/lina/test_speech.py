@@ -132,6 +132,24 @@ def test_transcribe_truncates_long_transcription():
     assert text is not None and len(text) == speech.MAX_STT_TEXT_CHARS
 
 
+def test_transcribe_surfaces_instrument_refusal():
+    # A refusal from the instrument (too long, unparseable) is not a silent
+    # None — it carries the reason so her endpoint can say why honestly.
+    class Refusal(StubResponse):
+        def __init__(self):
+            super().__init__(status_code=400)
+        def json(self):
+            return {"detail": "that recording is too long for her to hear at once"}
+    captured = {}
+    client = _client_with(captured, Refusal())
+    try:
+        _run(client.transcribe(b"audio-bytes"))
+        raise AssertionError("expected SpeechError")
+    except speech.SpeechError as exc:
+        assert exc.status_code == 400
+        assert "too long" in exc.detail
+
+
 # ── the endpoints — honest when no client is in the loop ─────────────────────
 
 def test_speech_endpoints_503_without_loop():

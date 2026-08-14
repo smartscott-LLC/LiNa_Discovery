@@ -310,12 +310,12 @@ const LinaApp = (() => {
             const fd = new FormData();
             fd.append("file", blob, "lina.webm");
             const r = await fetch("/lina/speech/transcribe", { method: "POST", body: fd });
-            const d = await r.json();
-            if (d.text) {
+            const d = await r.json().catch(() => ({}));
+            if (r.ok && d.text) {
               $("#chat-input").value = d.text;
               $("#chat-input").focus();
             } else {
-              alert("she could not hear that");
+              alert("she could not hear that — " + (d.detail || "unexpected error"));
             }
           } catch (err) { alert("listening failed: " + err.message); }
           finally { setThinking(false); }
