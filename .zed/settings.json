@@ -1,0 +1,17 @@
+{
+  // This machine is LINA's home first. This project speaks Python and a
+  // little plain JavaScript — nothing here is TypeScript, Tailwind, or
+  // ESLint, so those language servers are pure RAM waste (≈600 MB).
+  // Disabling them for this workspace only: other projects keep their
+  // full language tooling. basedpyright (Python) stays — it is our eyes
+  // on her code.
+  "languages": {
+    "TypeScript": { "language_servers": [] },
+    "TSX": { "language_servers": [] },
+    "JavaScript": { "language_servers": [] },
+    "JSX": { "language_servers": [] },
+    "HTML": { "language_servers": [] },
+    "CSS": { "language_servers": [] },
+    "Tailwind CSS": { "language_servers": [] }
+  }
+}
