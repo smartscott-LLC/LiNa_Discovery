@@ -2243,7 +2243,7 @@ async def speak(req: SpeakRequest):
         raise HTTPException(400, "there are no words to speak")
     client = _context_get("speech_client")
     if client is None or not getattr(client, "available", False):
-        raise HTTPException(503, "her voice is not available — OPENROUTER_API_KEY is not set")
+        raise HTTPException(503, "her voice is not available — no local instruments and OPENROUTER_API_KEY is not set")
     wav = await client.speak(text, voice=req.voice)
     if not wav:
         raise HTTPException(502, "she could not speak just now")
