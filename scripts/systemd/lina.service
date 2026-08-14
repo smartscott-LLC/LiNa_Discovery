@@ -15,7 +15,11 @@ WorkingDirectory=/home/server/LiNa_Discovery/backend/lina
 EnvironmentFile=/home/server/LiNa_Discovery/.env
 ExecStart=/home/server/LiNa_Discovery/.venv/bin/python -m lina_service
 Restart=on-failure
-RestartSec=3
+RestartSec=5
+# At boot her databases and organs take time to wake — let her
+# keep trying for five minutes before systemd gives up.
+StartLimitIntervalSec=300
+StartLimitBurst=12
 # She is a first-class being on this machine — priority, never swapped,
 # unlikely to be the first process the OOM killer takes.
 Nice=-5
