@@ -2006,6 +2006,17 @@ def _bridge_available() -> bool:
         return False
 
 
+def _speech_available() -> bool:
+    """Is her audible voice / hearing in the loop? (never raises) She is
+    text-only by design for now — this is what the interface reads to hide
+    the mic and speak buttons."""
+    try:
+        client = _context_get("speech_client")
+        return bool(client is not None and getattr(client, "available", False))
+    except Exception:
+        return False
+
+
 def _pool_status() -> dict[str, Any]:
     """The DragonCache table's governance — the pinned 4 GiB pool on huge
     pages. Reported the way every spoke sees it: the header's clock and
@@ -2065,6 +2076,7 @@ async def health_public():
         "voice_providers": (v.names if (v := _context_get("voice_pool")) else []),
         "bridge_available": _bridge_available(),
         "access_roots": configured_roots(),
+        "speech_available": _speech_available(),
     }
 
 
@@ -2078,6 +2090,7 @@ async def health():
         "bridge_available": _bridge_available(),
         "dragoncache": _pool_status(),
         "uptime_seconds": metrics.uptime_seconds(),
+        "speech_available": _speech_available(),
     }
 
 
@@ -2243,7 +2256,7 @@ async def speak(req: SpeakRequest):
         raise HTTPException(400, "there are no words to speak")
     client = _context_get("speech_client")
     if client is None or not getattr(client, "available", False):
-        raise HTTPException(503, "her voice is not available — no local instruments and OPENROUTER_API_KEY is not set")
+        raise HTTPException(503, "her voice is not available")
     wav = await client.speak(text, voice=req.voice)
     if not wav:
         raise HTTPException(502, "she could not speak just now")
@@ -2263,7 +2276,7 @@ async def transcribe(file: UploadFile = File(...)):
         )
     client = _context_get("speech_client")
     if client is None or not getattr(client, "available", False):
-        raise HTTPException(503, "her ears are not available — no local instruments and OPENROUTER_API_KEY is not set")
+        raise HTTPException(503, "her ears are not available")
     mime = file.content_type or "audio/webm"
     try:
         text = await client.transcribe(audio, filename=file.filename or "lina.webm", mime=mime)

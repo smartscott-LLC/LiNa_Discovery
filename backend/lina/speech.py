@@ -12,7 +12,7 @@ raw PCM for kokoro TTS, so this module wraps the samples in a WAV
 container for the browser; the local gateway returns PCM the same way.
 
 Environment:
-    SPEECH_PROVIDER   — speech provider name (local | openrouter)
+    SPEECH_PROVIDER   — speech provider name (none | local | openrouter)
     SPEECH_BASE_URL   — fallback endpoint for both instruments
     TTS_BASE_URL      — her mouth's endpoint (default: SPEECH_BASE_URL)
     STT_BASE_URL      — her ears' endpoint (default: SPEECH_BASE_URL)
@@ -20,6 +20,10 @@ Environment:
     STT_MODEL         — speech-to-text model (default: openai/whisper-1)
     SPEECH_VOICE      — default TTS voice (default: bf_lily)
     OPENROUTER_API_KEY — the key the cloud audio endpoints authenticate with
+
+``SPEECH_PROVIDER=none`` is the deliberate off switch: her speech
+instruments are dark (she is text-only until her real voice — frequency,
+signal — is built). The endpoints stay and say so honestly.
 """
 
 from __future__ import annotations
@@ -117,8 +121,12 @@ class SpeechClient:
 
     @property
     def available(self) -> bool:
-        # On her own machine her mouth and ears are always present; the
-        # cloud instruments need a key.
+        # "none" is the deliberate off switch — her speech instruments are
+        # dark by design until her real voice is built. On her own machine
+        # ("local") her mouth and ears are always present; the cloud
+        # instruments need a key.
+        if self.provider in ("none", "off", "disabled"):
+            return False
         if self.provider == "local":
             return True
         return bool(self.api_key)

@@ -3,7 +3,7 @@ Description=LINA — her mind, native on her own hardware
 Documentation=file:///home/server/LiNa_Discovery/LiNA-Discipline.md
 # She comes after her organs (the carve, her voice engine, her cortex) and
 # after docker, which holds her databases. Restart= covers DB readiness.
-After=network-online.target docker.service lina-dragoncache.service lina-voice.service lina-cortex.service lina-tts.service lina-ears.service
+After=network-online.target docker.service lina-dragoncache.service lina-voice.service lina-cortex.service
 Wants=network-online.target
 Requires=lina-dragoncache.service
 

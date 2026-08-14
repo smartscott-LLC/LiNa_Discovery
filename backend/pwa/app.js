@@ -14,6 +14,10 @@ const LinaApp = (() => {
     maximized: localStorage.getItem("lina.maximized") === "1",
     season: "spring",
     busy: false,
+    // Her speech instruments are off by design for now — she is text-only
+    // until her real voice (frequency, signal) is built. The health probe
+    // flips this, hiding the mic and the speak buttons with it.
+    speechAvailable: false,
   };
   let hoverPaused = false;
 
@@ -51,6 +55,11 @@ const LinaApp = (() => {
   async function refreshStatus() {
     try {
       const h = await api("/health");
+      state.speechAvailable = !!h.speech_available;
+      if (!state.speechAvailable) {
+        const mic = $("#mic-btn");
+        if (mic) mic.style.display = "none";
+      }
       setChip("chip-bridge", "bridge " + (h.bridge_available ? "up" : "down"), h.bridge_available ? "ok" : "warn");
       setChip("chip-voice", "voice " + (h.voice_providers || []).join("/"), h.voice_providers ? "ok" : "warn");
       setChip("chip-db", "db " + (h.database_connected ? "ok" : "down"), h.database_connected ? "ok" : "warn");
@@ -263,7 +272,7 @@ const LinaApp = (() => {
         wrap.appendChild(evalDiv);
         appendProposals(wrap, done.proposals);
       }
-      if (full && full.trim()) {
+      if (full && full.trim() && state.speechAvailable) {
         const speakBtn = document.createElement("button");
         speakBtn.className = "speak-btn";
         speakBtn.title = "Hear her say it";
