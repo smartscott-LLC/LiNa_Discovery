@@ -3,7 +3,7 @@
 **Audience:** engineers, ML practitioners, systems architects, researchers
 **Subject:** LINA as she exists now — architecture, implementation, capabilities, and trajectory
 **Author:** The Principal Architect, for Scott (smartscott.com LLC)
-**Status:** Describes the system as of the current implementation (all seven MPS phases complete; 162 tests green)
+**Status:** Describes the system as of the current implementation (all seven MPS phases complete; 175 tests green)
 
 ---
 
