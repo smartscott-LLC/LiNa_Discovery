@@ -114,4 +114,12 @@ def test_speech_endpoints_503_without_loop():
         files={"file": ("lina.webm", b"audio", "audio/webm")},
     )
     assert r2.status_code == 503
+
+
+def test_speak_empty_text_is_400():
+    # No words — a clear answer, not a confusing 502. Checked before the
+    # client lookup so it works without a loop.
+    client = TestClient(lina_service.app)
+    r = client.post("/lina/speech/speak", json={"text": "   "})
+    assert r.status_code == 400
     client.close()

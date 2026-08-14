@@ -1220,6 +1220,32 @@ class MemoryFormation:
 # Orchestrates all components per request.
 # =============================================================================
 
+def _trim_history(
+    messages: list[dict[str, Any]],
+    budget_chars: int = 8000,
+) -> list[dict[str, Any]]:
+    """Keep the recent conversation within the voice's context budget.
+
+    The local voice carries an 8192-token context. An unbounded history
+    overflows the KV cache — a batch that cannot fit fails to decode, and
+    that failure can take her GPU context down with it (the Vulkan device
+    was lost exactly this way). Keep the tail of the conversation and let
+    the memory system carry the deeper past; the most recent words always
+    ride along.
+    """
+    budget = max(1, budget_chars)
+    kept: list[dict[str, Any]] = []
+    used = 0
+    for msg in reversed(messages):
+        size = len(msg.get("content") or "")
+        if kept and used + size > budget:
+            break
+        kept.append(msg)
+        used += size
+    kept.reverse()
+    return kept or messages[-1:]
+
+
 class LINACore:
 
     def __init__(
@@ -1547,12 +1573,16 @@ class LINACore:
         )
 
         # 3. Get conversation history from working memory (already loaded above)
-        # Filter out internal system messages for the API call
-        api_history = [m for m in history if m.get("role") != "system"]
+        # Filter out internal system messages for the API call. The history is
+        # trimmed to the voice's context budget — an unbounded conversation
+        # overflows the local KV cache and can take her GPU context down with
+        # it. The memory system carries the deeper past.
+        api_history = _trim_history([m for m in history if m.get("role") != "system"])
 
         # 4. Store user message
         await self.working_memory.append(req.session_id, "user", req.message)
         await self._archive_turn(req=req, role="user", content=req.message)
+        _emit_event("chat", role="you", session=req.session_id, text=req.message[:120])
 
         # 4a. Dispatch the outgoing request through the TX chamber (Chamber A).
         # Triton can observe/relay the request to the network substrate; this
@@ -1740,6 +1770,11 @@ class LINACore:
         await self._archive_turn(
             req=req, role="assistant", content=raw_response,
             evaluation_id=str(eval_id) if eval_id else None,
+        )
+        _emit_event(
+            "chat", role="LINA", session=req.session_id,
+            text=raw_response[:120], zone=result.zone,
+            score=round(float(result.alignment_score), 3),
         )
 
         # 9a. Auto-feedback: if the response was corrected, teach the encoder.
@@ -2198,10 +2233,13 @@ class SpeakRequest(BaseModel):
 async def speak(req: SpeakRequest):
     """Her audible voice — text in, her spoken words (WAV) out. The same
     OpenAI-compatible audio contract her ears use, made playable."""
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(400, "there are no words to speak")
     client = _context_get("speech_client")
     if client is None or not getattr(client, "available", False):
         raise HTTPException(503, "her voice is not available — OPENROUTER_API_KEY is not set")
-    wav = await client.speak(req.text, voice=req.voice)
+    wav = await client.speak(text, voice=req.voice)
     if not wav:
         raise HTTPException(502, "she could not speak just now")
     return Response(content=wav, media_type="audio/wav")

@@ -69,7 +69,7 @@ class SpeechClient:
         stt_model: str | None = None,
         voice: str | None = None,
         api_key: str | None = None,
-        timeout: float = 60.0,
+        timeout: float = 180.0,
     ) -> None:
         provider = (os.getenv("SPEECH_PROVIDER") or "openrouter").strip().lower()
         self.base_url = (

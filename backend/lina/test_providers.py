@@ -211,6 +211,47 @@ def test_generate_stream_mid_stream_failure_surfaces():
             raise AssertionError(f"should have raised, got {chunks}")
         except VoicePoolError as e:
             assert "mid-stream" in str(e)
+
+
+def test_empty_stream_falls_back():
+    # A provider that answers with nothing (empty 200 — the wedge that
+    # silently delivered empty responses) is a failure: the next instrument
+    # carries her words instead of delivering silence.
+    async def run():
+        primary = ChunkProvider("local", responses=[])
+        backup = ChunkProvider("openrouter", responses=["hello", " world"])
+        pool = VoicePool([primary, backup])
+        chunks = [c async for c in pool.generate_stream("", [])]
+        assert chunks == ["hello", " world"]
+    asyncio.run(run())
+
+
+def test_empty_completion_falls_back():
+    # The non-stream path has the same rule: whitespace is not a voice.
+    class EmptyProvider(FakeProvider):
+        async def generate(self, system, messages, **kwargs):
+            self.calls += 1
+            return "   "
+    async def run():
+        pool = VoicePool([EmptyProvider("local"), FakeProvider("openrouter")])
+        text = await pool.generate("", [])
+        assert text == "openrouter:ok"
+    asyncio.run(run())
+
+
+def test_all_empty_raises():
+    # Every provider silent → an honest VoicePoolError, never a blank page.
+    class EmptyProvider(FakeProvider):
+        async def generate(self, system, messages, **kwargs):
+            return ""
+    async def run():
+        pool = VoicePool([EmptyProvider("a"), EmptyProvider("b")])
+        try:
+            await pool.generate("", [])
+            raise AssertionError("should have raised")
+        except VoicePoolError as e:
+            assert "empty" in str(e)
+    asyncio.run(run())
     asyncio.run(run())
 
 

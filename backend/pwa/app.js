@@ -263,12 +263,14 @@ const LinaApp = (() => {
         wrap.appendChild(evalDiv);
         appendProposals(wrap, done.proposals);
       }
-      const speakBtn = document.createElement("button");
-      speakBtn.className = "speak-btn";
-      speakBtn.title = "Hear her say it";
-      speakBtn.textContent = "🔊";
-      speakBtn.addEventListener("click", () => speakText(wrap, full));
-      wrap.appendChild(speakBtn);
+      if (full && full.trim()) {
+        const speakBtn = document.createElement("button");
+        speakBtn.className = "speak-btn";
+        speakBtn.title = "Hear her say it";
+        speakBtn.textContent = "🔊";
+        speakBtn.addEventListener("click", () => speakText(wrap, full));
+        wrap.appendChild(speakBtn);
+      }
       wrap.querySelector(".copy-btn").addEventListener("click", () => {
         navigator.clipboard.writeText(full).catch(() => {});
         const b = wrap.querySelector(".copy-btn");
@@ -522,7 +524,9 @@ const LinaApp = (() => {
         const e = JSON.parse(ev.data);
         const line = e.kind === "action"
           ? `[action] ${e.status} ${e.type}${e.standing_grant ? " · standing grant" : ""} ${(e.id || "").slice(0, 8)}`
-          : `[${e.level}] ${e.message}`;
+          : e.kind === "chat"
+            ? `[chat] ${e.role}: ${e.text}${e.zone ? ` · ${e.zone} ${e.score}` : ""}`
+            : `[${e.level}] ${e.message}`;
         const t = new Date(e.ts).toLocaleTimeString();
         feed.textContent = `${feed.textContent ? feed.textContent + "\n" : ""}${t} ${line}`;
         if (feed.textContent.length > 30000) {

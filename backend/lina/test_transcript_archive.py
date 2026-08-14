@@ -20,6 +20,7 @@ from lina_service import (  # noqa: E402
     SessionEndRequest,
     _run_stream_turn,
     _session_messages_for_reflection,
+    _trim_history,
 )
 from value_engine import ValueEngine  # noqa: E402
 
@@ -282,3 +283,33 @@ async def path_reflection_empty_is_empty():
 
 def test_reflection_empty_is_empty():
     asyncio.run(path_reflection_empty_is_empty())
+
+
+# ---------------------------------------------------------------------------
+# The history trim — the voice's context budget (an unbounded conversation
+# overflowed the KV cache and took her GPU context down with it)
+# ---------------------------------------------------------------------------
+
+def test_trim_keeps_the_recent_tail():
+    messages = [
+        {"role": "user", "content": f"message {i}" * 20}  # ~180 chars each
+        for i in range(10)
+    ]
+    trimmed = _trim_history(messages, budget_chars=800)
+    assert len(trimmed) >= 2
+    assert trimmed[-1] == messages[-1], "the most recent words always ride along"
+    total = sum(len(m["content"]) for m in trimmed)
+    assert total <= 800 + 180, "the budget is respected (plus the newest message)"
+    # The tail is preserved in order
+    assert trimmed[0]["content"] == messages[-len(trimmed)]["content"]
+
+
+def test_trim_keeps_at_least_the_last_message():
+    messages = [{"role": "user", "content": "x" * 5000}]
+    trimmed = _trim_history(messages, budget_chars=100)
+    assert trimmed == messages, "a single oversized message is never dropped"
+
+
+def test_trim_small_history_is_untouched():
+    messages = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+    assert _trim_history(messages) == messages

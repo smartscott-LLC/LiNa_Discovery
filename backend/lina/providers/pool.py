@@ -12,7 +12,7 @@ import logging
 import os
 from typing import Any, Callable
 
-from .base import AIProvider, VoicePoolError
+from .base import AIProvider, ProviderError, VoicePoolError
 from .deepseek import DeepSeekProvider
 from .gemini import GeminiProvider
 from .openai_compat import OpenAICompatProvider
@@ -109,6 +109,13 @@ class VoicePool:
             for index, provider in enumerate(self.providers):
                 try:
                     text = await provider.generate(system, messages, **kwargs)
+                    if not text or not text.strip():
+                        # Silence is not a voice. An empty completion is a
+                        # provider failure — the next instrument carries her
+                        # words rather than delivering emptiness.
+                        raise ProviderError(
+                            f"{provider.name} returned an empty completion"
+                        )
                     if provider is not self.providers[0]:
                         log.info(f"[voice] fell back to {provider.name}")
                     return text
@@ -146,6 +153,13 @@ class VoicePool:
                     async for chunk in provider.generate_stream(system, messages, **kwargs):
                         started = True
                         yield chunk
+                    if not started:
+                        # The provider answered with nothing — no words, no
+                        # error. That is a failure like any other: fall back
+                        # so her words are never silently emptiness.
+                        raise ProviderError(
+                            f"{provider.name} returned an empty stream"
+                        )
                     return
                 except Exception as exc:
                     if started:
