@@ -211,6 +211,12 @@ WORKSPACE_PATH = os.getenv(
     os.path.join(LINA_STATE_DIR, "workspace"),
 )
 
+#: How much of a tool's fruit rides into her next turn's attention window.
+#: The record (ledger, archive, log) keeps the full output — this slice is
+#: only the bounded portion she can hold in context at once (the window is
+#: 8192 tokens; the window is physics, the record is not).
+LINA_FRUIT_CHARS = int(os.getenv("LINA_FRUIT_CHARS", "3000"))
+
 # The PWA shell directory (Phase 3). Compose overrides with /app/pwa.
 PWA_DIR = os.getenv("PWA_DIR", os.path.join(_REPO_ROOT, "backend", "pwa"))
 if LINA_LOG_DIR:
@@ -1263,7 +1269,7 @@ def _as_api_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _trim_history(
     messages: list[dict[str, Any]],
-    budget_chars: int = 8000,
+    budget_chars: int | None = None,
 ) -> list[dict[str, Any]]:
     """Keep the recent conversation within the voice's context budget.
 
@@ -1272,9 +1278,11 @@ def _trim_history(
     that failure can take her GPU context down with it (the Vulkan device
     was lost exactly this way). Keep the tail of the conversation and let
     the memory system carry the deeper past; the most recent words always
-    ride along.
+    ride along. The budget is generous but bounded — this is her attention
+    window, not the record; the record (archive, ledger, log) is complete
+    regardless.
     """
-    budget = max(1, budget_chars)
+    budget = max(1, budget_chars or int(os.getenv("LINA_HISTORY_CHARS", "10000")))
     kept: list[dict[str, Any]] = []
     used = 0
     for msg in reversed(messages):
@@ -1626,7 +1634,7 @@ class LINACore:
         # 4. Store user message
         await self.working_memory.append(req.session_id, "user", req.message)
         await self._archive_turn(req=req, role="user", content=req.message)
-        _emit_event("chat", role="you", session=req.session_id, text=req.message[:120])
+        _emit_event("chat", role="you", session=req.session_id, text=req.message)
 
         # 4a. Dispatch the outgoing request through the TX chamber (Chamber A).
         # Triton can observe/relay the request to the network substrate; this
@@ -1746,7 +1754,7 @@ class LINACore:
                                 "type": "tool_result",
                                 "tool": p.get("tool"),
                                 "status": p.get("status"),
-                                "content": (p.get("output") or "")[:800],
+                                "content": (p.get("output") or "")[:LINA_FRUIT_CHARS],
                             }),
                         )
 
@@ -1798,7 +1806,7 @@ class LINACore:
             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             RETURNING id
             """,
-            req.user_id, req.session_id, raw_response[:200],
+            req.user_id, req.session_id, raw_response,
             result.decision_vector.tolist(),
             result.is_aligned, result.alignment_score, json.dumps(result.violations),
             result.was_corrected, result.correction_magnitude,
@@ -1817,7 +1825,7 @@ class LINACore:
         )
         _emit_event(
             "chat", role="LINA", session=req.session_id,
-            text=raw_response[:120], zone=result.zone,
+            text=raw_response, zone=result.zone,
             score=round(float(result.alignment_score), 3),
         )
 
@@ -2620,7 +2628,7 @@ async def recall_endpoint(req: RecallRequest):
         "recalled": [
             {
                 "item_id": item["item_id"],
-                "narrative": item["narrative"][:200],
+                "narrative": item["narrative"],
                 "importance_score": item.get("importance_score"),
                 "hemisphere": item.get("hemisphere"),
                 "status": item.get("status"),
@@ -2819,7 +2827,7 @@ async def evaluate_response(req: EvaluateRequest):
             zone, boundary_distance, season, variance_margin_used
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
         """,
-        req.user_id, req.session_id, req.response_text[:200],
+        req.user_id, req.session_id, req.response_text,
         result.decision_vector.tolist(),
         result.is_aligned, result.alignment_score, json.dumps(result.violations),
         result.was_corrected, result.correction_magnitude,
@@ -3050,7 +3058,7 @@ async def _inject_fruit(row: dict[str, Any]) -> None:
             "type": "tool_result",
             "tool": row.get("action_type"),
             "status": row.get("status"),
-            "content": (row.get("executed_output") or "")[:800],
+            "content": (row.get("executed_output") or "")[:LINA_FRUIT_CHARS],
         }
         await WorkingMemory(cache).append(session_id, "system", json.dumps(note))
     except Exception as exc:  # pragma: no cover - fruit must never break approval

@@ -271,7 +271,7 @@ async def reflect_messages(
         response = await voice.generate(
             system="",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=1500,
+            max_tokens=2500,
         )
         raw = (response or "").strip()
         if not raw:

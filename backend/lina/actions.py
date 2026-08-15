@@ -34,8 +34,11 @@ log = logging.getLogger("lina.actions")
 
 #: Default command timeout (seconds).
 COMMAND_TIMEOUT = float(os.getenv("LINA_COMMAND_TIMEOUT", "15"))
-#: Maximum characters of execution output kept on the action row.
-MAX_OUTPUT = 2000
+#: Maximum characters of execution output kept on the action row. This is
+#: the audit trail — the record of what she did — so it is generous and
+#: complete, not a display slice. The slice she actually holds in her
+#: attention window is bounded separately (LINA_FRUIT_CHARS).
+MAX_OUTPUT = int(os.getenv("LINA_ACTION_OUTPUT_MAX", "50000"))
 
 #: Action types that exist today. ``tool`` and the opfs records are audit
 #: carriers; the executable body lives in tools.py (the registry).

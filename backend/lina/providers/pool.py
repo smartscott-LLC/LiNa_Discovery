@@ -229,7 +229,16 @@ def build_voice_pool_from_env(
     for name in names:
         if name in {p.name for p in providers}:
             continue
-        provider = build_provider(name, base_url=base_url, model=model)
+        # AI_BASE_URL / AI_MODEL are cloud overrides — they must never
+        # hijack her own instrument. The local provider reads its own
+        # LOCAL_VOICE_URL / LOCAL_VOICE_MODEL; handing it the cloud
+        # override pointed her engine at DeepSeek's API with the wrong key
+        # and she silently fell back to the cloud on every turn.
+        provider = build_provider(
+            name,
+            base_url=None if name == "local" else base_url,
+            model=None if name == "local" else model,
+        )
         if provider is not None:
             providers.append(provider)
 

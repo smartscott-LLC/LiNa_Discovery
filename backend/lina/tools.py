@@ -41,7 +41,7 @@ from actions import ActionError, execute_action, resolve_action_path
 log = logging.getLogger("lina.tools")
 
 #: Maximum characters of tool output carried back to her.
-MAX_OUTPUT = 4000
+MAX_OUTPUT = int(os.getenv("LINA_TOOL_OUTPUT_MAX", "20000"))
 #: Maximum search matches returned.
 MAX_SEARCH_MATCHES = 200
 
@@ -390,7 +390,7 @@ async def process_tool_intents(
                     "action_id": action["id"],
                     "status": status,
                     "earned": earned,
-                    "output": result["output"][:400],
+                    "output": result["output"][:3000],
                 })
                 continue
         results.append({
