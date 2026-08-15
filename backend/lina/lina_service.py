@@ -1227,6 +1227,40 @@ class MemoryFormation:
 # Orchestrates all components per request.
 # =============================================================================
 
+def _as_api_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Working memory → the model's view of the conversation.
+
+    User and assistant turns pass through as they are. The tool fruit — a
+    system message of ``type=tool_result`` (her senses' return: the file
+    listing, the command output, the image description) — is unwrapped
+    into a plain, readable system note and **kept**: it belongs in the
+    conversation, or she genuinely cannot see what her own hands did.
+    Every other system message (evaluation, foresight) is internal
+    telemetry the prompt builder handles separately — those stay out.
+    """
+    api: list[dict[str, Any]] = []
+    for msg in history:
+        role = msg.get("role")
+        if role == "system":
+            content = msg.get("content")
+            if isinstance(content, str):
+                try:
+                    parsed = json.loads(content)
+                except (TypeError, ValueError):
+                    parsed = None
+            else:
+                parsed = content
+            if isinstance(parsed, dict) and parsed.get("type") == "tool_result":
+                tool = parsed.get("tool", "tool")
+                status = parsed.get("status", "")
+                output = (parsed.get("content") or "").strip()
+                label = f"[tool {tool}" + (f" — {status}]" if status else "]")
+                api.append({"role": "system", "content": f"{label}\n{output}"})
+            continue  # other system messages stay internal
+        api.append({"role": role, "content": msg.get("content", "")})
+    return api
+
+
 def _trim_history(
     messages: list[dict[str, Any]],
     budget_chars: int = 8000,
@@ -1580,11 +1614,14 @@ class LINACore:
         )
 
         # 3. Get conversation history from working memory (already loaded above)
-        # Filter out internal system messages for the API call. The history is
-        # trimmed to the voice's context budget — an unbounded conversation
-        # overflows the local KV cache and can take her GPU context down with
-        # it. The memory system carries the deeper past.
-        api_history = _trim_history([m for m in history if m.get("role") != "system"])
+        # The tool fruit travels as a system message (type=tool_result) and
+        # MUST reach the model — _as_api_history unwraps it into her view.
+        # Internal system messages (evaluation, foresight) are handled
+        # separately and stay filtered out. The history is trimmed to the
+        # voice's context budget — an unbounded conversation overflows the
+        # local KV cache and can take her GPU context down with it. The
+        # memory system carries the deeper past.
+        api_history = _trim_history(_as_api_history(history))
 
         # 4. Store user message
         await self.working_memory.append(req.session_id, "user", req.message)

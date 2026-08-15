@@ -6,6 +6,7 @@ and the reflection parser's honesty (empty and prose-wrapped reports).
 No database, no real browser — stubs and temp directories throughout.
 """
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -245,6 +246,35 @@ def test_unknown_tool_refused():
         season="winter", store=store, grants={},
     ))
     assert results[0]["status"] == "refused"
+
+
+# ── the fruit must reach her — tool results belong in the conversation ──────
+
+def test_tool_fruit_reaches_the_model():
+    # Her senses' return (file listings, command output, image descriptions)
+    # travels as a system message of type=tool_result — and it MUST reach
+    # the model, or she is blind to her own hands. Internal telemetry
+    # (evaluation, foresight) stays filtered out.
+    from lina_service import _as_api_history
+
+    history = [
+        {"role": "user", "content": "look at the files on my desk"},
+        {"role": "assistant", "content": "I will take a look."},
+        {"role": "system", "content": json.dumps({
+            "role": "system", "type": "evaluation",
+            "content": json.dumps({"is_aligned": True}),
+        })},
+        {"role": "system", "content": json.dumps({
+            "role": "system", "type": "tool_result", "tool": "file_list",
+            "status": "executed", "content": "notes/ (1)\nme.png (1.1 MB)",
+        })},
+    ]
+    api = _as_api_history(history)
+    joined = "\n".join(m.get("content", "") for m in api)
+    assert "me.png" in joined, "tool fruit must reach the model"
+    assert "[tool file_list" in joined, "the fruit is labelled as her own"
+    assert "is_aligned" not in joined, "telemetry must stay out of the conversation"
+    assert len(api) == 3, "user + assistant + fruit — nothing else"
 
 
 # ── vision — her image sight ────────────────────────────────────────────────
