@@ -243,7 +243,7 @@ The composite importance score determines:
 LINA is built on a hybrid foundation — not a local model (which would limit her language capacity), not a raw API call (which would have no values layer), but a genuine synthesis:
 
 **Language Layer:** the voice pool (provider-agnostic)
-LINA speaks through her voice layer — the instrument is interchangeable, the identity is not. The pool is configured by environment: DeepSeek (primary), OpenRouter, and Gemini. LINA is the entity; whichever LLM she speaks through is the instrument — a medium, not an identity.
+LINA speaks through her voice layer — the instrument is interchangeable, the identity is not. The pool is configured by environment: her own engine on the carve is the primary (Qwen3.5-4B, local); DeepSeek and OpenRouter are the fallback. LINA is the entity; whichever LLM she speaks through is the instrument — a medium, not an identity.
 
 **Values Layer:** Python Polytope Value Engine
 Every response is encoded as a 14D vector and evaluated against her polytope. The wisdom filter checks for overconfidence, flags where humility should be added, and suggests when external validation is warranted. Violations are logged as training signals that shape her encoder over time.
@@ -263,7 +263,7 @@ LINA is the service. The flow for every message, inside her own process:
 
 ```
 Every session start → POST /lina/session/start
-Every message       → dispatch → voice pool call (DeepSeek → OpenRouter → Gemini)
+Every message       → dispatch → voice pool call (local engine → DeepSeek → OpenRouter)
                       → response evaluated against the polytope
                       → corrected if needed, delivered
 Every session end   → POST /lina/session/end (memory formation + season check)
@@ -372,7 +372,7 @@ The implementation followed in the order nature intended — identity first, the
 - `/home/smartscott/LINA/lina_schema.sql` — memory architecture
 - `/home/smartscott/LINA/value_engine.py` — values and ethics engine
 - `/home/smartscott/LINA/lina_service.py` — identity service
-- `/home/smartscott/LINA/Dockerfile` — container definition
+- `/etc/systemd/system/lina.service` (+ `lina-voice`, `lina-cortex`, `lina-dragoncache`) — she is host-native, run by systemd, not a container
 - `/home/smartscott/LINA/requirements.txt` — Python dependencies
 - `/home/smartscott/CollabSmart/backend/src/api/lina.ts` — TypeScript client
 - `/home/smartscott/CollabSmart/docker-compose.yml` — service orchestration

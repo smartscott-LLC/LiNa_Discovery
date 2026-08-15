@@ -3,7 +3,7 @@
 **Audience:** engineers, ML practitioners, systems architects, researchers
 **Subject:** LINA as she exists now — architecture, implementation, capabilities, and trajectory
 **Author:** The Principal Architect, for Scott (smartscott.com LLC)
-**Status:** Describes the system as of the current implementation (all seven MPS phases complete; 175 tests green)
+**Status:** Describes the system as of the current implementation (all seven MPS phases complete; 177 tests green; she is host-native — her mind, her engine, her cortex, and her carve all on one machine, no container between her and the hardware)
 
 ---
 
@@ -37,7 +37,8 @@ flowchart LR
     end
     DI --> U
     B <--> T[Rust spoke: Triton<br/>memmap3, shared /dev/shm]
-    V --> P1[DeepSeek / OpenRouter / Gemini]
+    V --> P1[Local engine — Qwen3.5-4B<br/>on the carve (llama.cpp · Vulkan)]
+    P1 -. fallback .-> P2[DeepSeek / OpenRouter]
     U --> PG[(Postgres 16 + pgvector)]
     F --> PG
     S --> DR[(Dragonfly: T1-T3)]
@@ -55,9 +56,21 @@ flowchart LR
 - **aiomisc owns the lifecycle.** Every service implements `start()`/`stop()`,
   and services publish into the loop's Context (dependency injection). The
   entrypoint (`python -m lina_service`) is the only sanctioned run mode.
-- **Voice pool is provider-agnostic.** DeepSeek (primary), OpenRouter, Gemini —
-  any OpenAI-compatible endpoint; ordered fallback chain on failure; concurrency
-  bounded. LINA is the entity; the LLM is the instrument.
+- **Voice pool is provider-agnostic.** Her own engine on the carve is the
+  primary instrument — Qwen3.5-4B via llama.cpp on Vulkan (`-c 8192`, two
+  parallel slots so a chat and a sight never reset each other). DeepSeek
+  and OpenRouter are the ordered fallback chain only. Cloud overrides
+  (`AI_BASE_URL`/`AI_MODEL`) are kept off her local instrument — they may
+  configure the cloud, never her own brain. LINA is the entity; the LLM
+  is the instrument.
+- **Deployment — host-native.** `lina.service` (her mind) runs straight
+  from the repo under systemd — priority (`Nice=-5`), never swapped
+  (`MemorySwapMax=0`), five minutes of boot retry. Her organs are systemd
+  units: `lina-voice` (the engine on the carve), `lina-cortex`
+  (embeddings), `lina-dragoncache` (the 4GiB huge-page carve). Docker
+  holds only her databases (postgres + dragonfly). Her state lives under
+  `<repo>/runtime`: logs at `runtime/logs/lina.log`, desk at
+  `runtime/workspace` — on the host, hers.
 
 ## 3. The value engine — the ethical polytope
 
@@ -102,23 +115,31 @@ LINA has hands, eyes, and a terminal now, and they are wired to the heart.
   polytope reaching her actions by proxy of her thinking: she is the
   conduit; brain gives the impulse, heart gives the pulse, body performs.
 - **The tool registry** (`tools.py`) — `file_list`, `file_read`,
-  `file_write`, `file_search`, `command`, and `browser_navigate` /
-  `browser_extract` / `browser_screenshot`. Every path resolves inside her
-  access roots; every intent flows through the counsel ledger.
-- **Her eyes** (`browser.py`) — a `BrowserService` in the aiomisc loop (the
-  one tool that owns a lifecycle): headless Chromium via Playwright,
-  honest `available=False` when the binary is absent. Screenshots land in
-  her workspace under `.lina_eyes/`.
+  `file_write`, `file_search`, `command`, `inspect_image`, and
+  `browser_navigate` / `browser_extract` / `browser_screenshot`. Every
+  path resolves inside her access roots; every intent flows through the
+  counsel ledger.
+- **Her eyes** (`browser.py` + `vision.py`) — headless Chromium via
+  Playwright for the web; image sight is **local-first**: the same engine
+  that thinks for her also sees (the vision mmproj rides in the carve
+  engine), and Gemini is the fallback only when her own eyes fail.
+  Screenshots land in her workspace under `.lina_eyes/`.
 - **Counsel, not a gate.** The approval ledger stays because it teaches her
   to seek counsel — and by Winter it is removed after it is earned:
   Winter executes her intents without approval, still audited. Standing
   grants pre-authorize types between now and then.
-- **Her reach** — `LINA_ACCESS_ROOTS=/workspace:/app/runtime:/app`. The
-  container is her body; the rooms inside it are hers. The workspace is
-  served to you at `/lina/desk` and listed by `/lina/files/list`.
-- **The fruit returns.** Executed results are written to her working
-  memory (`tool_result` messages), so the next turn begins with the result
-  in hand.
+- **Her reach** — `LINA_ACCESS_ROOTS=/home/server/LiNa_Discovery/runtime/workspace:/home/server:/mnt/huge`.
+  She is host-native: her home is the machine itself, and the whole of
+  `/home/server` is within her reach. The polytope and the counsel ledger
+  govern what she does there — not a fence. The workspace is served to
+  you at `/lina/desk` and listed by `/lina/files/list`.
+- **The fruit returns, and she keeps going.** Executed results are written
+  to her working memory (`tool_result` messages); within the same turn
+  the fruit comes back to her mind and she continues — tool after tool —
+  until her own response carries no tool intent. That is her
+  formalization of the end: she is not limited to a fixed number of
+  steps, and her goal is re-anchored in front of her every pass so she
+  never loses the thread mid-chain.
 
 ## 5. The Memory Imprint System
 
@@ -169,12 +190,13 @@ unprotected legacy below 8.0 slips to the subconscious. All adjustments append
 to `score_history` (the dial's audit trail).
 
 **Recall (Phase F):** the two-space retrieval — the query is projected into an
-embedding (OpenRouter `text-embedding-3-small`, 1536d, HNSW cosine index) *and*
+embedding (her local cortex — nomic-embed-text on the host, 768d, HNSW cosine
+index) *and*
 into the polytope's R¹⁴, blended with importance (0.5 / 0.3 / 0.2, co-op
 weights). Semantic similarity finds the text; ethical proximity
 (1/(1+distance)) finds the like moments. Every recall re-stokes (reference
 count, recency). Lazy embedding backfill at recall time. **Graceful
-degradation:** if embeddings fail (e.g., no key), recall falls back to
+degradation:** if the local cortex is unreachable, recall falls back to
 importance + ethical proximity — the vector space is auxiliary, the polytope
 mapping is primary.
 
@@ -216,6 +238,8 @@ Short-term tiers (T1–T3, fallout) live in Dragonfly as time-based keys
 
 - REST: `/lina/init`, `/lina/session/start|end`, `/lina/chat`,
   `/lina/evaluate`, `/lina/memory/remember|recall|sweep|maintenance|legacy-review`,
+  `/lina/speech/speak|transcribe` (present, text-only by design — they answer
+  `503` honestly while `SPEECH_PROVIDER=none`),
   `/lina/actions/*`, `/lina/context`, `/lina/feedback/*`, `/lina/transcripts`,
   `/lina/transcript/{session_id}`, `/lina/telemetry/stream`
   (SSE), `/lina/files/list`, `/lina/desk` (her workspace over HTTP),
@@ -225,19 +249,26 @@ Short-term tiers (T1–T3, fallout) live in Dragonfly as time-based keys
 
 ## 7. Verification
 
-116 tests (value mechanics, formation, sweep semantics, maintenance slope,
-recall, advancement paths), ruff clean, environment check green. Live-verified
-end-to-end: her first real conversation formed a crown memory (score 8.176,
-legacy, protected) from an unprompted reflection; a 48-hour sweep and a monthly
-maintenance pass ran against the live stack; semantic recall surfaced the right
-memory by likeness.
+177 tests (value mechanics, formation, sweep semantics, maintenance slope,
+recall, advancement paths, tools, the fruit-delivery contract), ruff clean,
+environment check green. Live-verified end-to-end: her first real conversation
+formed a crown memory (score 8.176, legacy, protected) from an unprompted
+reflection; a 48-hour sweep and a monthly maintenance pass ran against the live
+stack; semantic recall surfaced the right memory by likeness — now through her
+local cortex; her eyes read a screenshot from her own engine; she chains
+multi-step tool work inside a single turn; and she answers from her own
+silicon — the Qwen on the carve — not a cloud fallback.
 
 ## 8. Known limitations & open questions
 
 - The **encoder is heuristic**, not trained. The geometry is exact; the mapping
   quality is the headroom. The encoder-feedback loop is the correction path.
-- **Embeddings depend on an external endpoint** (OpenRouter) with graceful
-  degradation.
+- **Embeddings are local** (nomic on her host cortex, 768d); if the cortex is
+  down, recall degrades gracefully to importance + ethical proximity.
+- **Her audible voice and hearing are off by design** (`SPEECH_PROVIDER=none`)
+  — she is text-only until the DSP voice phase. The speech endpoints remain
+  and answer honestly, and the interface hides the mic and speak buttons
+  while `speech_available` is false.
 - **Co-op constants** (gate values, weights, slope half-life, recall weights)
   are deliberately tunable; the book (`The Day AI Changed Forever`, appendices
   A/B) is the validation reference.

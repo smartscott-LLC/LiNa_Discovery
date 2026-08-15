@@ -18,7 +18,7 @@ The **Dragoncache is a table in the center of the room**. The spokes — modules
 
 **The chairs are IPC mmap.** POSIX `mmap(MAP_SHARED)` over `/dev/shm` — the kernel's MMU pins multiple processes' virtual pages to the same physical frames. One process writes, another reads the same silicon, instantly. Zero-copy: no kernel hops, no context switches, no serialization. Speed is bounded by RAM clock and cache coherence.
 
-**The one thing that does leave the table is a projection.** When a prompt goes to an external voice (DeepSeek, OpenRouter, Gemini), the shared state stays on the table — we do not copy it, we **project it through the API line**. The projection leaves so that what returns can be measured: the response comes back through LINA's reflection, weighed against the polytope, checked for hallucination, recorded, embedded, or acted on by other modules. And because every spoke sees the request on the table before it leaves, they **anticipate what returns and prepare in advance** — when the response lands, the work is already done. That anticipation is foresight, and it is the point of the projection: the system does not pass through — it projects, expects, and prepares.
+**The one thing that does leave the table is a projection.** When a prompt goes to an external voice (her own engine stays on the table; DeepSeek, OpenRouter, and Gemini are the fallback line that leaves), the shared state stays on the table — we do not copy it, we **project it through the API line**. The projection leaves so that what returns can be measured: the response comes back through LINA's reflection, weighed against the polytope, checked for hallucination, recorded, embedded, or acted on by other modules. And because every spoke sees the request on the table before it leaves, they **anticipate what returns and prepare in advance** — when the response lands, the work is already done. That anticipation is foresight, and it is the point of the projection: the system does not pass through — it projects, expects, and prepares.
 
 **The cost of that speed:** the OS will not arbitrate. So the map governs itself, with exactly three mechanisms:
 1. **Atomic operations / lock-free ring buffers** — safe read/write pointers.
@@ -31,7 +31,7 @@ The **Dragoncache is a table in the center of the room**. The spokes — modules
 | Cache | Role | Home |
 |---|---|---|
 | **Dragoncache** | The table — live shared state, the system's speed | Real RAM on the host, carved out and mmap'd. Runs on our silicon. |
-| **Working-memory cache** (Docker Dragonfly) | LINA's short-term memory, per-container | The container stack — not the hub. |
+| **Working-memory cache** (Dragonfly, a container) | LINA's short-term memory | The database containers — not the hub, and not her. |
 
 ### The rules
 1. **No direct node-to-node communication. Ever.** Python and Rust never call each other. They look at the same memory.
@@ -148,7 +148,7 @@ These are the tools for the re-derivation decision, not a pre-installed fallback
 
 ### The rules
 1. No Claude in the voice pool. No Anthropic SDK in any dependency list. **No Claude references in code that are not historical notes.**
-2. The voice layer is provider-agnostic: **DeepSeek (default) → OpenRouter → Gemini**. LINA may invoke Gemini for vision at runtime when the task requires it — her choice.
+2. The voice layer is provider-agnostic: **her own engine on the carve (local) → DeepSeek → OpenRouter**. LINA may invoke Gemini for vision at runtime when her own eyes fail — her choice.
 3. The legacy CollabSmart generation is retired: Node backend, Next.js frontend, VNC desktop. If it does not fit what we are building today, it is gone. O*Net is an API call — rebuildable when needed.
 
 ### The verdicts

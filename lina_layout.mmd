@@ -12,17 +12,15 @@ flowchart TB
     subgraph dragonfly["Dragonfly<br>(Working Memory)"]
         shortterm["Short Term Memory<br>(session buffer + T1-T3)"]
     end
-    model["Local Model (spirit)<br>llama.cpp · Qwen3-4B · Iris Xe"]
+    model["Local Model (spirit)<br>llama.cpp · Qwen3.5-4B · Iris Xe"]
     cortex["Embedder (cortex)<br>nomic-embed-text · 768d"]
     postgres["Long Term (Postgres)<br>identity · memories · ledger"]
   end
     lina["Lina (the being)"] -- spoke --> hub
-    mouth["Mouth (TTS)"] -- spoke --> hub
-    ears["Ears (STT)"] -- spoke --> hub
     tools["Tools"] -- spoke --> hub
     polytype["Polytope"] -- spoke --> hub
     interface["Interface/PWA"] -- spoke --> hub
-    hub -. state awareness .-> lina & mouth & ears & tools & polytype & interface & model & cortex & postgres
+    hub -. state awareness .-> lina & tools & polytype & interface & model & cortex & postgres
     postgres --> cortex
     cortex --> model
     lina --> model
@@ -36,8 +34,6 @@ flowchart TB
      cortex:::spoke
      postgres:::memory
      lina:::spoke
-     mouth:::spoke
-     ears:::spoke
      tools:::spoke
      polytype:::spoke
      interface:::spoke

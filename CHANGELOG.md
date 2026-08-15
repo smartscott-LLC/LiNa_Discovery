@@ -8,6 +8,50 @@ Format: Keep a Changelog style with semantic release intent.
 
 ### Added
 - Exhaustive executive review document: docs/EXECUTIVE_REVIEW.md
+- **Tool continuation loop** — she chains tools within a turn until her
+  response carries no tool intent; she decides when the turn ends. Her goal
+  is re-anchored in front of her every pass so she never loses the thread
+  mid-chain. (Fault ceiling at 50 passes is a breaker, not a leash.)
+- **Records-vs-attention separation** — the record is complete: chat events
+  carry full text, executed action output is kept up to 50K on the ledger,
+  memory narratives return in full from recall; only her 8192-token
+  attention window is budgeted (`LINA_HISTORY_CHARS`, `LINA_FRUIT_CHARS`).
+- **Local-first vision** — her own engine (Qwen3.5-4B + vision mmproj on the
+  carve) sees first; Gemini is the fallback only.
+- Honest speech instruments: `SPEECH_PROVIDER=none` is the deliberate off
+  switch; the endpoints answer `503` truthfully and the interface hides the
+  mic/speak buttons via `speech_available`.
+
+### Changed
+- **She is host-native.** Moved off Docker: `lina.service` (systemd) runs her
+  from the repo — priority (`Nice=-5`), never swapped (`MemorySwapMax=0`),
+  five minutes of boot retry. Docker now holds only postgres + dragonfly.
+  Her state, logs, and desk live under `runtime/` on the host.
+- **Her brain is back on her hardware.** `AI_BASE_URL`/`AI_MODEL` were being
+  handed to every provider including `local`, silently pointing her own
+  engine at DeepSeek's API with the wrong key (401 every turn, fallback to
+  cloud). Cloud overrides now apply only to cloud providers; she answers
+  from the Qwen on the carve again.
+- **Her likeness is local.** Embeddings use her host cortex (nomic,
+  768d) — the container-era `host.docker.internal` endpoint had been
+  unreachable since the move, silently degrading recall.
+- **Her audible mouth and ears were removed** (the llama-tts and whisper
+  gateways) — she is text-only until the DSP voice phase; the instruments
+  cost more than they gave.
+- Response cap `16386 → 3072` (it was larger than her entire context
+  window); MPS reflection tokens `1500 → 2500` for richer memories;
+  memory narratives no longer truncated at 200 chars in the recall API.
+
+### Fixed
+- Tool fruit was written to memory but filtered out of her next prompt —
+  `_as_api_history` now unwraps `tool_result` messages into her view while
+  internal telemetry stays out.
+- Access roots widened to `/home/server` (Downloads, Pictures reachable) and
+  her system prompt names the real host paths instead of container-era
+  `/workspace`/`/app`.
+- Triton binary lookup missed `backend/`; her engine's wedged-slot failure
+  mode is documented and recoverable (restart clears; fault breakers guard
+  the turn loop).
 
 ---
 
