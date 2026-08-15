@@ -245,6 +245,25 @@ Respond ONLY with the JSON array. No other text.
 {content}"""
 
 
+def _bounded_conversation(messages: list[dict[str, Any]], budget_chars: int = 6000) -> str:
+    """The recent conversation as reflection text, kept within a
+    context-safe budget — oldest first, the most recent words always
+    included. A reflection prompt that overflows her engine's window
+    fails silently and no memory is ever formed; the deep past lives in
+    the archive and her memory system, so reflection reads the recent
+    words, not the library."""
+    lines = [f"{m['role'].upper()}: {m['content']}" for m in messages]
+    kept: list[str] = []
+    used = 0
+    for line in reversed(lines):
+        if kept and used + len(line) > budget_chars:
+            break
+        kept.append(line)
+        used += len(line)
+    kept.reverse()
+    return "\n".join(kept)
+
+
 async def reflect_messages(
     voice: Any,
     *,
@@ -257,9 +276,7 @@ async def reflect_messages(
     what: str = "this conversation",
 ) -> list[dict[str, Any]]:
     """Ask her reflective voice to identify what is worth remembering."""
-    conversation_text = "\n".join(
-        f"{m['role'].upper()}: {m['content']}" for m in messages[-20:]
-    )
+    conversation_text = _bounded_conversation(messages[-20:])
     prompt = REFLECTION_PROMPT.format(
         scope=scope,
         session_number=session_number,
@@ -295,6 +312,16 @@ async def reflect_messages(
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
+            # An honest 'nothing stood out' is a legitimate empty reflection
+            # — a session with nothing worth keeping forms no memory, and
+            # that is the correct outcome, not a failure.
+            lowered = raw.lower()
+            if "nothing" in lowered and ("worth remembering" in lowered or "stood out" in lowered):
+                log.info(
+                    f"[mps] reflection for session {session_id}: "
+                    f"nothing worth remembering — []"
+                )
+                return []
             # The voice wrapped the array in prose — the JSON is still
             # there. Read the first array to its last bracket; if there is
             # none, fail honestly with the report's opening words.
