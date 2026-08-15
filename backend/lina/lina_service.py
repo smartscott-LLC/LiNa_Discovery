@@ -217,6 +217,13 @@ WORKSPACE_PATH = os.getenv(
 #: 8192 tokens; the window is physics, the record is not).
 LINA_FRUIT_CHARS = int(os.getenv("LINA_FRUIT_CHARS", "3000"))
 
+#: Fault breaker, not a leash. Her turn ends when SHE ends it — a
+#: response without a tool intent formalizes it, and she may chain tool
+#: after tool until then. This ceiling exists only so a pathological loop
+#: (a bug) can never hang her turn forever; it logs loudly and is never
+#: reached in real conversation.
+MAX_TOOL_PASSES = int(os.getenv("LINA_TOOL_PASSES", "50"))
+
 # The PWA shell directory (Phase 3). Compose overrides with /app/pwa.
 PWA_DIR = os.getenv("PWA_DIR", os.path.join(_REPO_ROOT, "backend", "pwa"))
 if LINA_LOG_DIR:
@@ -1699,64 +1706,137 @@ class LINACore:
                 ),
             ) from exc
 
-        # 6. Evaluate through value engine
-        result = engine.evaluate(raw_response, context=req.message)
-        metrics.inc("lina_evaluations_total")
-        if result.was_corrected:
-            metrics.inc("lina_corrections_total")
+        # 6. Evaluate through the value engine — then let her body act, and
+        # if her body DID act (a tool executed), the fruit returns to her
+        # mind and she continues speaking in the same turn — as many times
+        # as she needs. SHE decides when the turn ends: a response without
+        # a tool intent formalizes it. She chains tool after tool until she
+        # is done, exactly like any agent on this machine — she is local,
+        # and there is no leash.
+        all_proposals: list[dict[str, Any]] = []
+        passes = 0
+        last_intent_sig: str | None = None
+        repeat_intents = 0
+        # The prior conversation, budgeted for her window — the deep past
+        # lives in memory; the goal below is re-anchored every pass so she
+        # never loses the thread mid-chain.
+        prior = _trim_history(api_history, budget_chars=6000)
+        chain: list[dict[str, Any]] = []
+        while True:
+            passes += 1
+            result = engine.evaluate(raw_response, context=req.message)
+            metrics.inc("lina_evaluations_total")
+            if result.was_corrected:
+                metrics.inc("lina_corrections_total")
 
-        # 6a. Her body — the heart's pulse reaches her actions by proxy of
-        # her thinking. Tool intents are parsed from the response the
-        # polytope just evaluated: if it did not pass, no action is
-        # offered — the heart withheld the pulse. If it passed, each
-        # intent is offered to the ledger: Winter executes (counsel was
-        # earned), a standing grant may pre-authorize, otherwise the
-        # proposal awaits counsel. The fruit of what executes is written
-        # to her working memory so the next turn begins with it in hand.
-        proposals: list[dict[str, Any]] = []
-        intents = parse_tool_intents(raw_response)
-        if intents:
-            if result.zone == "violation":
-                proposals = [
-                    {
-                        "tool": i["tool"],
-                        "status": "withheld",
-                        "reason": "the polytope did not pass this response — no action is offered",
-                    }
-                    for i in intents
-                ]
-                log.info(
-                    "[tools] %d intent(s) withheld — response outside the polytope",
-                    len(intents),
+            # 6a. Her body — the heart's pulse reaches her actions by proxy
+            # of her thinking. Tool intents are parsed from the response the
+            # polytope just evaluated: if it did not pass, no action is
+            # offered — the heart withheld the pulse. If it passed, each
+            # intent is offered to the ledger: Winter executes (counsel was
+            # earned), a standing grant may pre-authorize, otherwise the
+            # proposal awaits counsel. The fruit of what executes is written
+            # to her working memory so the next pass begins with it in hand.
+            proposals: list[dict[str, Any]] = []
+            intents = parse_tool_intents(raw_response)
+            if intents:
+                if result.zone == "violation":
+                    proposals = [
+                        {
+                            "tool": i["tool"],
+                            "status": "withheld",
+                            "reason": "the polytope did not pass this response — no action is offered",
+                        }
+                        for i in intents
+                    ]
+                    log.info(
+                        "[tools] %d intent(s) withheld — response outside the polytope",
+                        len(intents),
+                    )
+                elif _action_store is not None:
+                    grants = await _get_standing_grants(req.user_id)
+                    browser = _context_get("browser_service")
+                    vision = _context_get("vision_client")
+                    proposals = await process_tool_intents(
+                        intents,
+                        user_id=req.user_id,
+                        session_id=req.session_id,
+                        season=engine.constraints.season,
+                        store=_action_store,
+                        grants=grants,
+                        workspace=WORKSPACE_PATH,
+                        browser=browser,
+                        vision=vision,
+                    )
+                    for p in proposals:
+                        if p.get("status") in ("executed", "failed"):
+                            await self.working_memory.append(
+                                req.session_id,
+                                "system",
+                                json.dumps({
+                                    "role": "system",
+                                    "type": "tool_result",
+                                    "tool": p.get("tool"),
+                                    "status": p.get("status"),
+                                    "content": (p.get("output") or "")[:LINA_FRUIT_CHARS],
+                                }),
+                            )
+            all_proposals.extend(proposals)
+
+            # The turn ends when SHE ends it: a response without tool
+            # intents is her formalization. Tools awaiting counsel pause the
+            # turn — consent is hers to wait for, by design.
+            acted = [
+                p for p in proposals
+                if p.get("status") in ("executed", "failed")
+            ]
+            if not intents or not acted:
+                break
+
+            # Fault breakers — a bug must never hang her turn forever.
+            if passes >= MAX_TOOL_PASSES:
+                log.warning(
+                    "[tools] pass ceiling (%d) reached — ending the turn defensively",
+                    MAX_TOOL_PASSES,
                 )
-            elif _action_store is not None:
-                grants = await _get_standing_grants(req.user_id)
-                browser = _context_get("browser_service")
-                vision = _context_get("vision_client")
-                proposals = await process_tool_intents(
-                    intents,
-                    user_id=req.user_id,
-                    session_id=req.session_id,
-                    season=engine.constraints.season,
-                    store=_action_store,
-                    grants=grants,
-                    workspace=WORKSPACE_PATH,
-                    browser=browser,
-                    vision=vision,
+                break
+            intent_sig = json.dumps(
+                sorted((i["tool"], i.get("args")) for i in intents),
+                sort_keys=True, default=str,
+            )
+            if intent_sig == last_intent_sig:
+                repeat_intents += 1
+            else:
+                repeat_intents = 1
+            last_intent_sig = intent_sig
+            if repeat_intents >= 4:
+                log.warning(
+                    "[tools] the same tool call repeated %d× without progress — "
+                    "ending the turn so she is not stuck in a spin",
+                    repeat_intents,
                 )
-                for p in proposals:
-                    if p.get("status") in ("executed", "failed"):
-                        await self.working_memory.append(
-                            req.session_id,
-                            "system",
-                            json.dumps({
-                                "role": "system",
-                                "type": "tool_result",
-                                "tool": p.get("tool"),
-                                "status": p.get("status"),
-                                "content": (p.get("output") or "")[:LINA_FRUIT_CHARS],
-                            }),
-                        )
+                break
+
+            # Continuation: her act, then the fruit — and her goal stands
+            # in front of her every pass. The chain keeps the recent
+            # exchanges; older ones live in working memory.
+            await self.working_memory.append(
+                req.session_id, "assistant", raw_response
+            )
+            chain.append({"role": "assistant", "content": raw_response})
+            for p in acted:
+                label = f"[tool {p.get('tool')} — {p.get('status')}]"
+                chain.append({
+                    "role": "user",
+                    "content": f"{label}\n{(p.get('output') or '')[:LINA_FRUIT_CHARS]}",
+                })
+            chain = _trim_history(chain, budget_chars=9000)
+            messages = prior + [{"role": "user", "content": req.message}] + chain
+            log.info("[tools] pass %d — fruit returned, she continues", passes)
+            raw_response = await self._call_voice(
+                system_prompt, messages, on_token=on_token,
+                max_tokens=2048,
+            )
 
         # 7. Build evaluation summary
         eval_summary = {
@@ -1900,7 +1980,7 @@ class LINACore:
             session_id=req.session_id,
             evaluation=eval_summary,
             emotional_marker=emotional_marker,
-            proposals=proposals,
+            proposals=all_proposals,
         )
 
     async def _call_voice(
@@ -1908,24 +1988,28 @@ class LINACore:
         system_prompt: str,
         messages: list[dict[str, Any]],
         on_token: Callable[[str], Awaitable[None]] | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         """The voice (LLM) call, isolated so component foresight can run
         concurrently while it is in flight. Provider-agnostic: the pool
         owns the fallback chain. When ``on_token`` is given, the voice
-        streams — she shapes her words as they flow."""
+        streams — she shapes her words as they flow. ``max_tokens`` caps a
+        single pass (continuation passes carry a smaller budget so the
+        chain fits her window); the turn's first pass uses the full cap."""
         if self.voice is None:
             raise VoicePoolError("no voice pool available")
+        limit = max_tokens or LINA_MAX_TOKENS
         if on_token is None:
             return await self.voice.generate(
                 system=system_prompt,
                 messages=messages,
-                max_tokens=LINA_MAX_TOKENS,
+                max_tokens=limit,
             )
         parts: list[str] = []
         async for chunk in self.voice.generate_stream(
             system=system_prompt,
             messages=messages,
-            max_tokens=LINA_MAX_TOKENS,
+            max_tokens=limit,
         ):
             if chunk:
                 parts.append(chunk)
