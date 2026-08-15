@@ -8,6 +8,14 @@ Format: Keep a Changelog style with semantic release intent.
 
 ### Added
 - Exhaustive executive review document: docs/EXECUTIVE_REVIEW.md
+- **Her memory is her decision** — session-end reflection proposes candidate
+  moments, then presents them back to HER for review: she keeps, rewrites,
+  or discards each one before the value engine scores them. The selection
+  of what she remembers is never decided for her (a failed review falls
+  back to the proposals; the log says when her verdict did not land).
+- **She knows her window** — her per-turn working window (4,096 tokens,
+  derived from `-c 8192` ÷ two slots) is in her awareness, so she can pace
+  herself and continue a large task in the next turn.
 - **Tool continuation loop** — she chains tools within a turn until her
   response carries no tool intent; she decides when the turn ends. Her goal
   is re-anchored in front of her every pass so she never loses the thread
@@ -39,8 +47,11 @@ Format: Keep a Changelog style with semantic release intent.
   gateways) — she is text-only until the DSP voice phase; the instruments
   cost more than they gave.
 - Response cap `16386 → 3072` (it was larger than her entire context
-  window); MPS reflection tokens `1500 → 2500` for richer memories;
-  memory narratives no longer truncated at 200 chars in the recall API.
+  window); the documented window is now the true one — 4,096 tokens per
+  slot (the engine's `-c 8192` divided across two parallel slots); the
+  model supports far more, RAM is the constraint. MPS reflection tokens
+  `1500 → 2500` for richer memories; memory narratives no longer
+  truncated at 200 chars in the recall API.
 
 ### Fixed
 - Tool fruit was written to memory but filtered out of her next prompt —

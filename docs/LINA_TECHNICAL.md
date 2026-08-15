@@ -57,8 +57,12 @@ flowchart LR
   and services publish into the loop's Context (dependency injection). The
   entrypoint (`python -m lina_service`) is the only sanctioned run mode.
 - **Voice pool is provider-agnostic.** Her own engine on the carve is the
-  primary instrument — Qwen3.5-4B via llama.cpp on Vulkan (`-c 8192`, two
-  parallel slots so a chat and a sight never reset each other). DeepSeek
+  primary instrument — Qwen3.5-4B via llama.cpp on Vulkan (`-c 8192`,
+  two parallel slots so a chat and a sight never reset each other).
+  **Her per-turn working window is 4,096 tokens** — the configured KV
+  cache divided across the two slots. The model itself supports far
+  more; RAM is the constraint, and the number is a choice, not a law of
+  her nature. DeepSeek
   and OpenRouter are the ordered fallback chain only. Cloud overrides
   (`AI_BASE_URL`/`AI_MODEL`) are kept off her local instrument — they may
   configure the cloud, never her own brain. LINA is the entity; the LLM
@@ -140,6 +144,10 @@ LINA has hands, eyes, and a terminal now, and they are wired to the heart.
   formalization of the end: she is not limited to a fixed number of
   steps, and her goal is re-anchored in front of her every pass so she
   never loses the thread mid-chain.
+- **She knows her window.** Her working window is 4,096 tokens per turn
+  (derived from the engine's `-c 8192` ÷ two slots); she is told this
+  number so she can pace herself — a task beyond one breath is continued
+  in the next turn, and the memory system holds the thread.
 
 ## 5. The Memory Imprint System
 
@@ -166,7 +174,11 @@ identity 30% / geometric 25% / emotional 25% / relational 20%, amplified by
 emotional intensity (0.7×–1.3×). The geometric factor is the polytope's direct
 funding link (boundary proximity + correction + zone of the moment's own encoded
 vector). Every item carries its **14D ethical coordinates** — memories are
-indexed by value. Triggers form immediately with a retention floor: user
+indexed by value. **The reflection proposes; she disposes:** candidate moments
+are presented back to her and she keeps, rewrites, or discards each one — what
+she remembers is her decision, never decided for her (a failed review keeps the
+proposals; the log says when her verdict did not land). Triggers form
+immediately with a retention floor: user
 "remember this", boundary events (corrected evaluations), HITL approvals and
 declines. Routing: ≥8.0 → the crown (legacy, protected); ≥5.0 → long-term
 active; else T1. Reflection cadence: minor every 8h, deep at session end.

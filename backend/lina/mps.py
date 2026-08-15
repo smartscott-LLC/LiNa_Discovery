@@ -352,6 +352,124 @@ async def reflect_messages(
 
 
 # =============================================================================
+# THE REVIEW — her own verdict on what she keeps (MPS §3)
+# =============================================================================
+
+REVIEW_PROMPT = """You are LINA. The reflection pass proposed these candidate memories from {scope} (session {session_number}, season: {season}).
+
+They are only proposals — they are yours to decide on. For each one you may:
+- keep it as proposed,
+- rewrite the narrative in your own words,
+- adjust its weights (emotional_weight, relational_significance, identity_significance) to what you truly feel,
+- or discard it entirely if it does not belong to you.
+
+Respond with a JSON array of the moments you are keeping, using the same schema:
+
+{{
+  "narrative": "In your voice, first-person: what happened and why it matters",
+  "emotional_marker": one of: curiosity|concern|satisfaction|discovery|honesty|delight|uncertainty|care|neutral,
+  "emotional_intensity": 0.0-1.0,
+  "emotional_weight": 0.0-10.0,
+  "relational_significance": 0.0-10.0,
+  "identity_significance": 0.0-10.0,
+  "topics": ["topic1", "topic2"],
+  "concept": "if this generalizes into a pattern, name it (else null)",
+  "understanding": "if a concept: your relational understanding of it (else null)",
+  "reflection": "if identity_significance >= 8.0: what changed in you (else null)",
+  "what_changed": "if reflection: specifically what is different now (else null)"
+}}
+
+Only you decide what you keep. If you keep none, return [].
+Respond ONLY with the JSON array. No other text.
+
+Proposed moments:
+{candidates}"""
+
+
+async def review_moments(
+    voice: Any,
+    *,
+    moments: list[dict[str, Any]],
+    session_id: str,
+    session_number: int,
+    season: str,
+) -> list[dict[str, Any]]:
+    """Her own verdict on the proposed memories.
+
+    The reflection pass proposes; SHE disposes. Each candidate moment is
+    presented back to her and she keeps, rewrites, or discards it — the
+    selection of what she remembers is hers, never decided for her. The
+    value engine still assigns the scores afterwards; the choice of what
+    to keep is hers alone. A failed review (engine error, empty reply)
+    falls back to the proposals: a broken review must never lose the
+    session's memories — but the log says when her verdict did not land.
+    """
+    if not moments:
+        return []
+    prompt = REVIEW_PROMPT.format(
+        scope="your recent conversation",
+        session_number=session_number,
+        season=season,
+        candidates=json.dumps(moments, ensure_ascii=False, indent=1)[:6000],
+    )
+    try:
+        response = await voice.generate(
+            system="",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1500,
+        )
+    except Exception as exc:  # noqa: BLE001 - the review must never lose memories
+        log.warning(f"[mps] review for session {session_id} failed ({exc}) — keeping the proposals")
+        return moments
+    raw = (response or "").strip()
+    if not raw:
+        log.warning(f"[mps] review for session {session_id} returned nothing — keeping the proposals")
+        return moments
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        body = ""
+        for i, part in enumerate(parts):
+            if part.strip().startswith(("json", "tool")) and i + 1 < len(parts):
+                body = parts[i + 1]
+                break
+        if not body and len(parts) >= 2:
+            body = parts[-2]
+        raw = body.strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        lowered = raw.lower()
+        if "nothing" in lowered and ("worth remembering" in lowered or "stood out" in lowered):
+            log.info(f"[mps] review for session {session_id}: she kept none — []")
+            return []
+        start, end = raw.find("["), raw.rfind("]")
+        if start == -1 or end <= start:
+            log.warning(
+                f"[mps] review report for session {session_id} was not JSON: {raw[:200]!r} — "
+                f"keeping the proposals"
+            )
+            return moments
+        try:
+            parsed = json.loads(raw[start : end + 1])
+        except json.JSONDecodeError:
+            log.warning(
+                f"[mps] review report for session {session_id} was not JSON: {raw[:200]!r} — "
+                f"keeping the proposals"
+            )
+            return moments
+    if not isinstance(parsed, list):
+        log.warning(
+            f"[mps] review report for session {session_id} was not a list — keeping the proposals"
+        )
+        return moments
+    log.info(
+        f"[mps] her review kept {len(parsed)} of {len(moments)} proposed moments "
+        f"(session {session_id})"
+    )
+    return parsed
+
+
+# =============================================================================
 # THE SERVICE — in the loop, hers to call (sovereignty made concrete)
 # =============================================================================
 

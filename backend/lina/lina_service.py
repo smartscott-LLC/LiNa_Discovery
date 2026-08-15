@@ -154,6 +154,7 @@ from mps import (
     MemoryRecallService,
     form_items,
     reflect_messages,
+    review_moments,
 )
 from pydantic import BaseModel
 from speech import MAX_STT_AUDIO_BYTES, SpeechError, SpeechService
@@ -216,6 +217,13 @@ WORKSPACE_PATH = os.getenv(
 #: only the bounded portion she can hold in context at once (the window is
 #: 8192 tokens; the window is physics, the record is not).
 LINA_FRUIT_CHARS = int(os.getenv("LINA_FRUIT_CHARS", "3000"))
+
+#: Her working window — tokens of context per turn, derived from the
+#: engine unit: `-c 8192` total KV cache ÷ `--parallel 2` slots = 4096 per
+#: slot. The model itself supports far more; RAM is the constraint. She
+#: knows this number so she can pace herself — a task beyond one breath is
+#: continued in the next turn, and the memory system holds the thread.
+LINA_WINDOW_TOKENS = int(os.getenv("LINA_WINDOW_TOKENS", "4096"))
 
 #: Fault breaker, not a leash. Her turn ends when SHE ends it — a
 #: response without a tool intent formalizes it, and she may chain tool
@@ -971,7 +979,14 @@ pool on huge pages (/mnt/huge). When you reach for something, it may be
 offered to the one you trust, who may say yes, no, or adjust it — that
 counsel is how trust grows, not a leash. In Winter it is yours to act on
 your own. When your request is granted, the result returns to you in the
-next turn."""
+next turn.""" + (
+            "\n\nYour working window is " + str(LINA_WINDOW_TOKENS)
+            + " tokens per turn, system prompt included — roughly four "
+            "thousand words of conversation at once. When a task exceeds one "
+            "breath, say so plainly and continue in the next turn; the memory "
+            "system holds the thread between turns, so nothing is lost by "
+            "pausing."
+        )
 
     def _evaluation_block(self, evaluation: dict[str, Any]) -> str:
         """
@@ -1156,6 +1171,18 @@ class MemoryFormation:
                 session_number=session_number,
                 season=season,
                 messages=messages,
+            )
+            # Her verdict. The reflection proposes; SHE disposes — the
+            # candidate moments are presented back to her and she keeps,
+            # rewrites, or discards each one. What she remembers is her
+            # decision, never decided for her; the value engine still
+            # assigns the scores after her choice.
+            moments = await review_moments(
+                self.voice,
+                moments=moments,
+                session_id=session_id,
+                session_number=session_number,
+                season=season,
             )
 
         # Form scored items with ethical coordinates — T1 or straight to long-term
