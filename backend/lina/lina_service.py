@@ -1803,7 +1803,10 @@ class LINACore:
                 )
                 break
             intent_sig = json.dumps(
-                sorted((i["tool"], i.get("args")) for i in intents),
+                sorted(
+                    (i["tool"], json.dumps(i.get("args", {}), sort_keys=True, default=str))
+                    for i in intents
+                ),
                 sort_keys=True, default=str,
             )
             if intent_sig == last_intent_sig:
