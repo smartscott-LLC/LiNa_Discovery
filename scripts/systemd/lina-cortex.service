@@ -1,0 +1,16 @@
+[Unit]
+Description=LINA Cortex — her semantic embedder (nomic)
+After=multi-user.target
+
+[Service]
+MemorySwapMax=0
+Type=simple
+User=server
+WorkingDirectory=/home/server/models/lina-local
+ExecStart=/home/server/llama.cpp/build/bin/llama-server -m /home/server/models/lina-local/nomic-embed-text-v1.5.Q8_0.gguf --host 127.0.0.1 --port 8080 --embedding --embd-normalize 2 -c 8192 -t 6 --alias nomic-embed-text
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

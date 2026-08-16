@@ -1,6 +1,7 @@
 """The `AIProvider` contract — every instrument in LINA's orchestra."""
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import Any
 
 
@@ -57,7 +58,7 @@ class AIProvider(ABC):
         system: str,
         messages: list[dict[str, Any]],
         **kwargs: Any,
-    ) -> Any:
+    ) -> AsyncIterator[str]:
         """Stream a completion, chunk by chunk.
 
         Same contract as :meth:`generate`, but yields the response text in

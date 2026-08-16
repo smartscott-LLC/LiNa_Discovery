@@ -50,15 +50,14 @@ Run (standalone app, no aiomisc services):
     uvicorn lina_service:app --host 0.0.0.0 --port 8001
 
 Environment variables:
-    AI_PROVIDER         — primary voice (default: deepseek)
+    AI_PROVIDER         — primary voice (default: siliconflow)
     AI_PROVIDERS        — ordered fallback chain (comma-separated)
     AI_BASE_URL         — optional endpoint override for the primary
     AI_MODEL            — optional model override for the primary
-    DEEPSEEK_API_KEY    — activates DeepSeek
-    OPENROUTER_API_KEY  — activates OpenRouter
-    GEMINI_API_KEY      — activates Gemini
+    SILICON_FLOW_API_KEY — activates SiliconFlow (primary voice)
+    HUGGING_FACE_ACCESS_TOKEN — activates HuggingFace (fallback voice)
     LOCAL_VOICE_URL     — her local instrument's endpoint (default: http://127.0.0.1:8081/v1)
-    LOCAL_VOICE_MODEL   — her local instrument's model (default: qwen3.5-4b)
+    LOCAL_VOICE_MODEL   — her local instrument's model (default: qwen2-vl-2b)
     LOCAL_VOICE_API_KEY — local dummy key (the engine does not authenticate)
     LOCAL_VISION_URL    — her image sight's endpoint (default: same local engine)
     LOCAL_VISION_MODEL  — the model she sees with (default: qwen3.5-4b)
@@ -75,7 +74,7 @@ Environment variables:
     TTS_MODEL           — text-to-speech model (default: hexgrad/kokoro-82m)
     STT_MODEL           — speech-to-text model (default: openai/whisper-1)
     SPEECH_VOICE        — default TTS voice (default: af_heart)
-    SPEECH_BASE_URL     — optional speech endpoint override (default: OpenRouter /api/v1)
+    SPEECH_BASE_URL     — optional speech endpoint override (default: none — text-only)
     LINA_MAX_TOKENS     — max response tokens (default: 1024)
     LINA_VOICE_MAX_CONCURRENT — concurrent voice calls (default: 4)
     LINA_STATE_DIR      — runtime storage root — logs, state, workspace
@@ -83,11 +82,11 @@ Environment variables:
     LINA_LOG_DIR        — log directory (default: <LINA_STATE_DIR>/logs)
     WORKSPACE_PATH      — root for approved file/command actions
                           (default: <LINA_STATE_DIR>/workspace; container: /workspace)
-    EMBEDDING_BASE_URL   — embeddings endpoint (default: OpenRouter /api/v1)
-    EMBEDDING_BASE_MODEL — embedding model (default: openai/text-embedding-3-small)
-    EMBEDDING_API_KEY    — embeddings key (default: OPENROUTER_API_KEY)
-    EMBEDDING_REFERER    — optional; HTTP-Referer for rankings on openrouter.ai
-    EMBEDDING_TITLE      — optional; X-OpenRouter-Title for rankings
+    EMBEDDING_BASE_URL   — embeddings endpoint (default: http://127.0.0.1:8080/v1)
+    EMBEDDING_BASE_MODEL — embedding model (default: nomic-embed-text)
+    EMBEDDING_API_KEY    — embeddings key (default: local — the cortex does not authenticate)
+    EMBEDDING_REFERER    — optional; HTTP-Referer for rankings on the provider
+    EMBEDDING_TITLE      — optional; X-Provider-Title for rankings
     PWA_DIR             — PWA shell directory served at /pwa (default: <repo>/backend/pwa)
     ASSETS_DIR          — her theme directory served at /assets (default: <repo>/assets)
     LINA_COMMAND_TIMEOUT — HITL command execution timeout in seconds
@@ -3592,7 +3591,7 @@ class VoicePoolService(Service):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self.default_provider = default_provider or os.getenv("AI_PROVIDER", "deepseek")
+        self.default_provider = default_provider or os.getenv("AI_PROVIDER", "siliconflow")
         self.max_concurrent = max_concurrent
         self.pool: VoicePool | None = None
 
@@ -3610,7 +3609,7 @@ class VoicePoolService(Service):
         if not self.pool.providers:
             log.warning(
                 "[voice] no providers configured — LINA is silent until an "
-                "API key is set (e.g. DEEPSEEK_API_KEY)"
+                "API key is set (e.g. SILICON_FLOW_API_KEY)"
             )
         else:
             log.info(
@@ -3658,7 +3657,7 @@ def main() -> None:
     # instruments and nervous system are already online.
     services: list[Service] = [
         VoicePoolService(
-            default_provider=os.getenv("AI_PROVIDER", "deepseek"),
+            default_provider=os.getenv("AI_PROVIDER", "siliconflow"),
             max_concurrent=max_concurrent,
         ),
         IPCBridgeService(tx_path=tx_path, rx_path=rx_path),
@@ -3721,7 +3720,7 @@ def main() -> None:
     # With SPEECH_PROVIDER=none she is text-only by design, and the speech
     # instrument is not even created — no client object, nothing reserved;
     # the endpoints still answer honestly that her voice is not available.
-    if (os.getenv("SPEECH_PROVIDER", "openrouter").strip().lower()
+    if (os.getenv("SPEECH_PROVIDER", "none").strip().lower()
             not in ("none", "off", "disabled")):
         services.insert(0, SpeechService())
     # Her image sight — Gemini, in the loop. Dark until GEMINI_API_KEY is

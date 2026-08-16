@@ -13,10 +13,9 @@ import os
 from typing import Any, Callable
 
 from .base import AIProvider, ProviderError, VoicePoolError
-from .deepseek import DeepSeekProvider
-from .gemini import GeminiProvider
+from .huggingface import HuggingFaceProvider
 from .openai_compat import OpenAICompatProvider
-from .openrouter import OpenRouterProvider
+from .siliconflow import SiliconFlowProvider
 
 log = logging.getLogger("lina.voice")
 
@@ -53,9 +52,8 @@ class LocalVoiceProvider(OpenAICompatProvider):
 
 #: Well-known providers and their environment key names.
 PROVIDER_BUILDERS: dict[str, type[AIProvider]] = {
-    "deepseek": DeepSeekProvider,
-    "openrouter": OpenRouterProvider,
-    "gemini": GeminiProvider,
+    "siliconflow": SiliconFlowProvider,
+    "huggingface": HuggingFaceProvider,
     "local": LocalVoiceProvider,
 }
 
@@ -101,7 +99,7 @@ class VoicePool:
         if not self.providers:
             raise VoicePoolError(
                 "no voice providers configured — set AI_PROVIDER and a "
-                "provider API key (e.g. DEEPSEEK_API_KEY)"
+                "provider API key (e.g. SILICON_FLOW_API_KEY)"
             )
 
         async with self._semaphore:
@@ -142,7 +140,7 @@ class VoicePool:
         if not self.providers:
             raise VoicePoolError(
                 "no voice providers configured — set AI_PROVIDER and a "
-                "provider API key (e.g. DEEPSEEK_API_KEY)"
+                "provider API key (e.g. SILICON_FLOW_API_KEY)"
             )
 
         async with self._semaphore:
@@ -208,11 +206,11 @@ def build_voice_pool_from_env(
 
     Resolution order:
       1. AI_PROVIDERS (comma-separated) — explicit fallback chain, if set
-      2. AI_PROVIDER (default ``deepseek``) followed by every other known
+      2. AI_PROVIDER (default ``siliconflow``) followed by every other known
          provider that is configured
     Only providers with an API key present are instantiated.
     """
-    primary = (primary or os.getenv("AI_PROVIDER") or "deepseek").strip().lower()
+    primary = (primary or os.getenv("AI_PROVIDER") or "siliconflow").strip().lower()
 
     chain_env = os.getenv("AI_PROVIDERS", "")
     if chain_env.strip():
@@ -232,7 +230,7 @@ def build_voice_pool_from_env(
         # AI_BASE_URL / AI_MODEL are cloud overrides — they must never
         # hijack her own instrument. The local provider reads its own
         # LOCAL_VOICE_URL / LOCAL_VOICE_MODEL; handing it the cloud
-        # override pointed her engine at DeepSeek's API with the wrong key
+        # override pointed her engine at a cloud API with the wrong key
         # and she silently fell back to the cloud on every turn.
         provider = build_provider(
             name,

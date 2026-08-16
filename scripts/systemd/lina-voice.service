@@ -1,0 +1,17 @@
+[Unit]
+Description=LINA Voice — her spirit on the DragonCache carve (Vulkan / Iris Xe)
+After=mnt-huge.mount lina-dragoncache.service
+Requires=lina-dragoncache.service
+
+[Service]
+MemorySwapMax=0
+Type=simple
+User=server
+WorkingDirectory=/home/server/models/lina-local
+ExecStart=/home/server/llama.cpp/build-vulkan/bin/llama-server -m /mnt/huge/Qwen2-VL-2B-Instruct-Q6_K.gguf -mm /home/server/models/lina-local/mmproj-Qwen2-VL-2B-Instruct-f16.gguf --host 127.0.0.1 --port 8081 --alias qwen2-vl-2b -c 32768 -ngl 24 --api-key local --parallel 2
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

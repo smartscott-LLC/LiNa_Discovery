@@ -1,10 +1,11 @@
-"""OpenAI-compatible chat provider — the common base for DeepSeek,
-OpenRouter, and Gemini (all expose the `/chat/completions` contract).
+"""OpenAI-compatible chat provider — the common base for SiliconFlow,
+HuggingFace, and any provider that exposes the `/chat/completions` contract.
 Streaming rides the same contract: ``stream: true`` and SSE ``data:``
 lines, which every one of them speaks."""
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -102,7 +103,7 @@ class OpenAICompatProvider(AIProvider):
         system: str,
         messages: list[dict[str, Any]],
         **kwargs: Any,
-    ) -> Any:
+    ) -> AsyncIterator[str]:
         """Stream the completion over SSE — chunks as they arrive."""
         payload_messages: list[dict[str, Any]] = []
         if system:

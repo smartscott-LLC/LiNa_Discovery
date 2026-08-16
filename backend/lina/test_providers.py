@@ -106,35 +106,34 @@ def test_primary_is_first():
 
 
 def test_factory_env_chain():
-    os.environ["DEEPSEEK_API_KEY"] = "k-deepseek"
-    os.environ["OPENROUTER_API_KEY"] = "k-openrouter"
-    os.environ.pop("GEMINI_API_KEY", None)
+    os.environ["SILICON_FLOW_API_KEY"] = "k-siliconflow"
+    os.environ["HUGGING_FACE_ACCESS_TOKEN"] = "k-huggingface"
     os.environ.pop("AI_PROVIDERS", None)
 
     async def run():
-        pool = build_voice_pool_from_env(primary="deepseek", max_concurrent=3)
-        # deepseek + openrouter have keys; gemini skipped; local is always
+        pool = build_voice_pool_from_env(primary="siliconflow", max_concurrent=3)
+        # siliconflow + huggingface have keys; local is always
         # available — her voice lives on her own machine now.
-        assert pool.names == ["deepseek", "openrouter", "local"], pool.names
+        assert pool.names == ["siliconflow", "huggingface", "local"], pool.names
         assert pool.max_concurrent == 3
     asyncio.run(run())
 
 
 def test_factory_chain_override():
-    os.environ["AI_PROVIDERS"] = "openrouter,deepseek"
+    os.environ["AI_PROVIDERS"] = "huggingface,siliconflow"
     async def run():
-        pool = build_voice_pool_from_env(primary="deepseek")
-        assert pool.names == ["openrouter", "deepseek"], pool.names
+        pool = build_voice_pool_from_env(primary="siliconflow")
+        assert pool.names == ["huggingface", "siliconflow"], pool.names
     asyncio.run(run())
     os.environ.pop("AI_PROVIDERS", None)
 
 
 def test_factory_no_keys_empty():
-    for var in ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"):
+    for var in ("SILICON_FLOW_API_KEY", "HUGGING_FACE_ACCESS_TOKEN"):
         os.environ.pop(var, None)
     os.environ.pop("AI_PROVIDERS", None)
     async def run():
-        pool = build_voice_pool_from_env(primary="deepseek")
+        pool = build_voice_pool_from_env(primary="siliconflow")
         # The cloud providers need keys; the local instrument does not —
         # she always has her own voice on this machine.
         assert pool.names == ["local"], pool.names

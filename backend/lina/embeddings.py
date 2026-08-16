@@ -6,19 +6,16 @@ recall. The ethical coordinates are the other half (the polytope mapping);
 together they are the two-space retrieval of the MPS: semantic similarity
 finds the text, ethical proximity finds the like moments.
 
-An OpenAI-compatible /embeddings endpoint (default: OpenRouter), so any
-embedding model behind that contract works. The request matches OpenRouter's
-documented contract exactly: model, input, encoding_format=float, and the
-optional ranking headers. Failures degrade gracefully — recall falls back to
-importance + ethical proximity. The vector space is auxiliary; the polytope
-mapping is primary.
+An OpenAI-compatible /embeddings endpoint (default: the local cortex —
+her own nomic engine on the carve), so any embedding model behind that
+contract works. Failures degrade gracefully — recall falls back to
+importance + ethical proximity. The vector space is auxiliary; the
+polytope mapping is primary.
 
 Environment:
-    EMBEDDING_BASE_URL    — embeddings endpoint (default: OpenRouter /api/v1)
-    EMBEDDING_BASE_MODEL  — embedding model (default: openai/text-embedding-3-small)
-    EMBEDDING_API_KEY     — embeddings key (default: OPENROUTER_API_KEY)
-    EMBEDDING_REFERER     — optional; HTTP-Referer for rankings on openrouter.ai
-    EMBEDDING_TITLE       — optional; X-OpenRouter-Title for rankings
+    EMBEDDING_BASE_URL    — embeddings endpoint (default: http://127.0.0.1:8080/v1)
+    EMBEDDING_BASE_MODEL  — embedding model (default: nomic-embed-text)
+    EMBEDDING_API_KEY     — embeddings key (default: local — the cortex does not authenticate)
 """
 
 from __future__ import annotations
@@ -30,8 +27,8 @@ import httpx
 
 log = logging.getLogger("lina.embeddings")
 
-DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "openai/text-embedding-3-small"
+DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1"
+DEFAULT_MODEL = "nomic-embed-text"
 
 
 class EmbeddingClient:
@@ -56,8 +53,7 @@ class EmbeddingClient:
         self.api_key = (
             api_key
             or os.getenv("EMBEDDING_API_KEY")
-            or os.getenv("OPENROUTER_API_KEY")
-            or ""
+            or "local"  # her cortex does not authenticate
         )
         self.referer = referer or os.getenv("EMBEDDING_REFERER") or ""
         self.title = title or os.getenv("EMBEDDING_TITLE") or ""
