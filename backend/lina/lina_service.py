@@ -75,7 +75,11 @@ Environment variables:
     STT_MODEL           — speech-to-text model (default: openai/whisper-1)
     SPEECH_VOICE        — default TTS voice (default: af_heart)
     SPEECH_BASE_URL     — optional speech endpoint override (default: none — text-only)
-    LINA_MAX_TOKENS     — max response tokens (default: 1024)
+    LINA_MAX_TOKENS     — max response tokens (default: 12000)
+    LINA_HISTORY_CHARS  — character budget for conversation history per turn
+                           (default: 18000, see _trim_history)
+    LINA_FRUIT_CHARS    — character budget for tool output in the attention
+                           window (default: 6000; full output is always in the record)
     LINA_VOICE_MAX_CONCURRENT — concurrent voice calls (default: 4)
     LINA_STATE_DIR      — runtime storage root — logs, state, workspace
                           (default: <repo>/runtime; container: /app/runtime)
@@ -214,7 +218,7 @@ WORKSPACE_PATH = os.getenv(
 #: The record (ledger, archive, log) keeps the full output — this slice is
 #: only the bounded portion she can hold in context at once (the window is
 #: 8192 tokens; the window is physics, the record is not).
-LINA_FRUIT_CHARS = int(os.getenv("LINA_FRUIT_CHARS", "3000"))
+LINA_FRUIT_CHARS = int(os.getenv("LINA_FRUIT_CHARS", "6000"))
 
 #: Fault breaker, not a leash. Her turn ends when SHE ends it — a
 #: response without a tool intent formalizes it, and she may chain tool
@@ -275,7 +279,7 @@ _action_store: ActionStore | None = None
 
 DATABASE_URL      = os.getenv("DATABASE_URL", "postgresql://localhost/collabsmart")
 REDIS_URL         = os.getenv("REDIS_URL", "redis://localhost:6379")
-LINA_MAX_TOKENS   = int(os.getenv("LINA_MAX_TOKENS", "1024"))
+LINA_MAX_TOKENS   = int(os.getenv("LINA_MAX_TOKENS", "12000"))
 
 # Optional services — all opt-in via environment variables.
 METRICS_ENABLED = os.getenv("METRICS_ENABLED", "").lower() in ("1", "true", "yes")
@@ -1279,16 +1283,15 @@ def _trim_history(
 ) -> list[dict[str, Any]]:
     """Keep the recent conversation within the voice's context budget.
 
-    The local voice carries an 8192-token context. An unbounded history
-    overflows the KV cache — a batch that cannot fit fails to decode, and
-    that failure can take her GPU context down with it (the Vulkan device
-    was lost exactly this way). Keep the tail of the conversation and let
-    the memory system carry the deeper past; the most recent words always
-    ride along. The budget is generous but bounded — this is her attention
-    window, not the record; the record (archive, ledger, log) is complete
-    regardless.
+    The attention window is bounded by ``LINA_HISTORY_CHARS`` (default
+    18000 chars, ~5000-6000 tokens) so the model always has room for the
+    system prompt, user message, and output tokens. An unbounded history
+    overflows the local KV cache; the memory system (Dragonfly + Postgres)
+    carries the deeper past. The budget is generous but bounded — this is
+    her attention window, not the record; the record (archive, ledger, log)
+    is complete regardless.
     """
-    budget = max(1, budget_chars or int(os.getenv("LINA_HISTORY_CHARS", "10000")))
+    budget = max(1, budget_chars or int(os.getenv("LINA_HISTORY_CHARS", "18000")))
     kept: list[dict[str, Any]] = []
     used = 0
     for msg in reversed(messages):
@@ -1719,7 +1722,7 @@ class LINACore:
         # The prior conversation, budgeted for her window — the deep past
         # lives in memory; the goal below is re-anchored every pass so she
         # never loses the thread mid-chain.
-        prior = _trim_history(api_history, budget_chars=6000)
+        prior = _trim_history(api_history, budget_chars=int(os.getenv("LINA_HISTORY_CHARS", "18000")) * 2 // 3)
         chain: list[dict[str, Any]] = []
         while True:
             passes += 1
@@ -1829,12 +1832,11 @@ class LINACore:
                     "role": "user",
                     "content": f"{label}\n{(p.get('output') or '')[:LINA_FRUIT_CHARS]}",
                 })
-            chain = _trim_history(chain, budget_chars=9000)
+            chain = _trim_history(chain, budget_chars=int(os.getenv("LINA_HISTORY_CHARS", "18000")))
             messages = prior + [{"role": "user", "content": req.message}] + chain
             log.info("[tools] pass %d — fruit returned, she continues", passes)
             raw_response = await self._call_voice(
                 system_prompt, messages, on_token=on_token,
-                max_tokens=2048,
             )
 
         # 7. Build evaluation summary
