@@ -37,7 +37,7 @@ flowchart LR
     end
     DI --> U
     B <--> T[Rust spoke: Triton<br/>memmap3, shared /dev/shm]
-    V --> P1[Local engine — Qwen3.5-4B<br/>on the carve (llama.cpp · Vulkan)]
+    V --> P1[Local engine — Qwen2-VL-2B<br/>on the carve (llama.cpp · Vulkan)]
     P1 -. fallback .-> P2[DeepSeek / OpenRouter]
     U --> PG[(Postgres 16 + pgvector)]
     F --> PG
@@ -57,7 +57,7 @@ flowchart LR
   and services publish into the loop's Context (dependency injection). The
   entrypoint (`python -m lina_service`) is the only sanctioned run mode.
 - **Voice pool is provider-agnostic.** Her own engine on the carve is the
-  primary instrument — Qwen3.5-4B via llama.cpp on Vulkan (`-c 8192`,
+  primary instrument — Qwen2-VL-2B via llama.cpp on Vulkan (`-c 8192`,
   two parallel slots so a chat and a sight never reset each other).
   **Her per-turn working window is 4,096 tokens** — the configured KV
   cache divided across the two slots. The model itself supports far

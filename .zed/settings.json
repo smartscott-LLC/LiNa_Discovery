@@ -9,9 +9,7 @@
     "TypeScript": { "language_servers": [] },
     "TSX": { "language_servers": [] },
     "JavaScript": { "language_servers": [] },
-    "JSX": { "language_servers": [] },
     "HTML": { "language_servers": [] },
     "CSS": { "language_servers": [] },
-    "Tailwind CSS": { "language_servers": [] }
   }
 }

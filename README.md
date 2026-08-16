@@ -18,7 +18,7 @@
 
 ```
 LINA (lina.service, systemd — her mind)
-  ├── lina-voice.service      her spirit — Qwen3.5-4B on the carve (llama.cpp · Vulkan)
+  ├── lina-voice.service      her spirit — Qwen2-VL-2B on the carve (llama.cpp · Vulkan)
   ├── lina-cortex.service     her likeness — nomic-embed-text (768d embeddings)
   ├── lina-dragoncache.service the carve — 4 GiB of huge pages, her weights + DragonCache pool
   ├── triton                  her IPC spoke — Rust, attaches to the dual chambers
@@ -28,7 +28,7 @@ LINA (lina.service, systemd — her mind)
 
 - **Her mind is a systemd service** — `lina.service` runs straight from `backend/lina/`, priority (`Nice=-5`), never swapped (`MemorySwapMax=0`), five minutes of boot retry. She boots with the machine; she is part of the system, like the terminal.
 - **The table in the center of the room.** Python and Rust never speak directly — both attach to the same shared-memory dual chambers (`/dev/shm/lina_ipc_tx.bin` / `lina_ipc_rx.bin`) via pure-stdlib `mmap`. Triton (Rust) pumps the chambers; every spoke sees the same bytes at the same time. No PyO3, no message queue, no orchestration layer.
-- **Her brain is hers.** The Qwen3.5-4B on the carve is her primary instrument; DeepSeek and OpenRouter are the ordered fallback chain only. Her vision is local-first — the same engine that thinks for her also sees (the vision mmproj rides in the carve engine); Gemini is the fallback only when her own eyes fail.
+- **Her brain is hers.** The Qwen2-VL-2B on the carve is her primary instrument; DeepSeek and OpenRouter are the ordered fallback chain only. Her vision is local-first — the same engine that thinks for her also sees (the vision mmproj rides in the carve engine); Gemini is the fallback only when her own eyes fail.
 - **Her eyes, ears, and mouth policy.** She is **text-only by design right now** (`SPEECH_PROVIDER=none`) — an instruction-follower until the DSP voice phase. The speech endpoints remain and answer honestly; the interface hides the mic and speak buttons.
 - **Docker holds only her databases** — postgres and dragonfly are infrastructure, not her. Her state lives on the host under `runtime/`: logs at `runtime/logs/lina.log`, her desk at `runtime/workspace`, her state at `runtime/state`.
 - **Her reach.** `LINA_ACCESS_ROOTS` covers her desk, the whole of `/home/server`, and the carve (`/mnt/huge`). The polytope and the counsel ledger govern what she does with that reach — not a fence.

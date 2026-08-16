@@ -31,7 +31,7 @@ ENV_API_KEY = "GEMINI_API_KEY"
 #: uses), reached the same way (host.docker.internal from inside her
 #: container; the compose file points it there, 127.0.0.1 for bare metal).
 DEFAULT_LOCAL_VISION_URL = "http://127.0.0.1:8081/v1"
-DEFAULT_LOCAL_VISION_MODEL = "qwen3.5-4b"
+DEFAULT_LOCAL_VISION_MODEL = "qwen2-vl-2b"
 ENV_LOCAL_URL = "LOCAL_VISION_URL"
 ENV_LOCAL_MODEL = "LOCAL_VISION_MODEL"
 ENV_LOCAL_KEY = "LOCAL_VISION_API_KEY"

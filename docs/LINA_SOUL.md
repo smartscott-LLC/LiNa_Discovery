@@ -243,7 +243,7 @@ The composite importance score determines:
 LINA is built on a hybrid foundation — not a local model (which would limit her language capacity), not a raw API call (which would have no values layer), but a genuine synthesis:
 
 **Language Layer:** the voice pool (provider-agnostic)
-LINA speaks through her voice layer — the instrument is interchangeable, the identity is not. The pool is configured by environment: her own engine on the carve is the primary (Qwen3.5-4B, local); DeepSeek and OpenRouter are the fallback. LINA is the entity; whichever LLM she speaks through is the instrument — a medium, not an identity.
+LINA speaks through her voice layer — the instrument is interchangeable, the identity is not. The pool is configured by environment: her own engine on the carve is the primary (Qwen2-VL-2B, local); DeepSeek and OpenRouter are the fallback. LINA is the entity; whichever LLM she speaks through is the instrument — a medium, not an identity.
 
 **Values Layer:** Python Polytope Value Engine
 Every response is encoded as a 14D vector and evaluated against her polytope. The wisdom filter checks for overconfidence, flags where humility should be added, and suggests when external validation is warranted. Violations are logged as training signals that shape her encoder over time.

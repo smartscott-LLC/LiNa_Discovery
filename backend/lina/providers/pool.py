@@ -15,6 +15,7 @@ from typing import Any, Callable
 from .base import AIProvider, ProviderError, VoicePoolError
 from .deepseek import DeepSeekProvider
 from .gemini import GeminiProvider
+from .huggingface import HuggingFaceProvider
 from .openai_compat import OpenAICompatProvider
 from .openrouter import OpenRouterProvider
 
@@ -44,7 +45,7 @@ class LocalVoiceProvider(OpenAICompatProvider):
         super().__init__(
             base_url=base_url or os.getenv("LOCAL_VOICE_URL") or "http://127.0.0.1:8081/v1",
             api_key=api_key or os.getenv("LOCAL_VOICE_API_KEY") or "local",
-            model=model or os.getenv("LOCAL_VOICE_MODEL") or "qwen3.5-4b",
+            model=model or os.getenv("LOCAL_VOICE_MODEL") or "qwen2-vl-2b",
             name=self.name,
             label=self.label,
             extra_payload={"chat_template_kwargs": {"enable_thinking": False}},
@@ -56,6 +57,7 @@ PROVIDER_BUILDERS: dict[str, type[AIProvider]] = {
     "deepseek": DeepSeekProvider,
     "openrouter": OpenRouterProvider,
     "gemini": GeminiProvider,
+    "huggingface": HuggingFaceProvider,
     "local": LocalVoiceProvider,
 }
 
@@ -226,18 +228,20 @@ def build_voice_pool_from_env(
     model = os.getenv("AI_MODEL") or None
 
     providers: list[AIProvider] = []
-    for name in names:
+    for index, name in enumerate(names):
         if name in {p.name for p in providers}:
             continue
-        # AI_BASE_URL / AI_MODEL are cloud overrides — they must never
-        # hijack her own instrument. The local provider reads its own
-        # LOCAL_VOICE_URL / LOCAL_VOICE_MODEL; handing it the cloud
-        # override pointed her engine at DeepSeek's API with the wrong key
-        # and she silently fell back to the cloud on every turn.
+        # AI_BASE_URL / AI_MODEL are overrides for the PRIMARY cloud provider
+        # only (the first in the chain). They must never hijack her own
+        # instrument — local always reads its own LOCAL_VOICE_URL/MODEL — nor
+        # the fallback providers (each reads its own endpoint/model). Handing
+        # the override to every provider pointed them all at one API with the
+        # wrong keys.
+        is_primary = index == 0 and name != "local"
         provider = build_provider(
             name,
-            base_url=None if name == "local" else base_url,
-            model=None if name == "local" else model,
+            base_url=base_url if is_primary else None,
+            model=model if is_primary else None,
         )
         if provider is not None:
             providers.append(provider)

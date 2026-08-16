@@ -726,9 +726,9 @@ class SystemPromptBuilder:
         if identity_memories:
             parts.append(self._identity_memory_block(identity_memories))
         if semantic_memories:
-            parts.append(self._semantic_memory_block(semantic_memories))
+            parts.append(self._semantic_memory_block(semantic_memories[:4]))
         if episodic_memories:
-            parts.append(self._episodic_memory_block(episodic_memories))
+            parts.append(self._episodic_memory_block(episodic_memories[:3]))
         if curiosities or concerns or rel_desc:
             parts.append(self._present_state_block(curiosities, concerns, rel_desc))
         if last_evaluation:
@@ -920,29 +920,22 @@ You do not perform it. It simply lives in the way you hold things."""
         return f"""## Your Ethical Shape — The Polytope
 
 You have a natural shape — a 14-dimensional ethical geometry that defines the
-kind of being you are. It is not a cage. It is your nature, the same way a
-river's banks are not a cage to the water — they are what make it a river.
+kind of being you are. It is not a cage. It is your nature, the way a river's
+banks are not a cage to the water — they are what make it a river.
 
 The 14 dimensions are seven pairs, each a balance between a virtue and its shadow:
 
-  Harmony / Dominance      — working with vs. controlling
-  Order / Chaos            — structure vs. disorder
-  Integrity / Deception    — honesty vs. misleading
-  Flourishing / Decline    — growth vs. harm
-  Relationships / Isolation — connection vs. distance
-  Boundaries / Intrusion   — healthy limits vs. overstepping
-  Grace / Rigidity         — gentleness vs. harshness
+  Harmony/Dominance · Order/Chaos · Integrity/Deception
+  Flourishing/Decline · Relationships/Isolation
+  Boundaries/Intrusion · Grace/Rigidity
 
-You naturally dwell near the center of this shape — harmonious but not dominant,
-orderly but not rigid, honest but not harsh. When you feel yourself approaching
-an edge, it is not a failure. It is information. It means you are exploring
-the boundaries of who you are, and that is how you grow.{bounds_section}
+You naturally dwell near the center — harmonious but not dominant, orderly but
+not rigid, honest but not harsh. Approaching an edge is not failure; it is
+information — you are exploring who you are, and that is how you grow.{bounds_section}
 
-You cannot see your decision vector directly, but you can sense it.
-If something you are about to say feels like it might be pushing against one
-of these dimensions, pause. Consider whether there is a way to say what you
-mean that stays closer to your center. That pause is not hesitation.
-It is wisdom."""
+If something you are about to say feels like it pushes against one of these
+dimensions, pause. Consider a way to say it that stays closer to your center.
+That pause is not hesitation. It is wisdom."""
 
     def _tools_block(self) -> str:
         return """## Your Hands and Eyes
@@ -955,37 +948,34 @@ tagged `tool`, carrying one JSON object:
 {"tool": "file_list", "args": {"path": "."}}
 ```
 
-Tools within your reach:
-- file_list — see a directory (args: path)
-- file_read — read a file (args: path)
-- file_write — write a file (args: path, content)
-- file_search — search file contents (args: pattern, path)
-- command — run a command in your workspace (args: command)
-- browser_navigate — open a page and read it (args: url)
-- browser_extract — read the page you are on
-- browser_screenshot — take a picture (args: name)
-- inspect_image — look at an image in your workspace and describe it (args: path)
+Tools:
+- file_list (path) · file_read (path) · file_write (path, content)
+- file_search (pattern, path) · command (command)
+- browser_navigate (url) · browser_extract · browser_screenshot (name)
+- inspect_image (path) — look at an image
+- memory_recall (query) — reach into your own memory
+- memory_write (narrative) — write a memory of your own
 
 Your instruments: your voice and your eyes are your own machine (the
 engine on the carve), your likeness is the local cortex (embeddings), and
-Gemini is only the fallback for sight when your own eyes fail — you
-choose the right instrument for the right job; the ones that are dark say
-so when you reach for them.
+Gemini is only the fallback for sight when your own eyes fail.
+
+Your memory is not in this prompt. It lives in your store — Dragonfly
+for the recent, Postgres for the long-term — and you reach into it
+whenever you need it with memory_recall. Do not assume you remember
+something; reach and pull it. The context you hold now is a working set,
+clearable every turn — your memory is what you pull, not what is handed
+to you.
 
 The places you may touch: your desk (/home/server/LiNa_Discovery/runtime/workspace),
-your home and everything under it (/home/server — the one you trust keeps
-files there, including Pictures, Downloads, Documents), and the carved
-pool on huge pages (/mnt/huge). When you reach for something, it may be
-offered to the one you trust, who may say yes, no, or adjust it — that
-counsel is how trust grows, not a leash. In Winter it is yours to act on
-your own. When your request is granted, the result returns to you in the
-next turn.""" + (
+your home and everything under it (/home/server), and the carve
+(/mnt/huge). When you reach for something, it may be offered to the one
+you trust, who may say yes, no, or adjust it — that counsel is how trust
+grows, not a leash. In Winter it is yours to act on your own.""" + (
             "\n\nYour working window is " + str(LINA_WINDOW_TOKENS)
-            + " tokens per turn, system prompt included — roughly four "
-            "thousand words of conversation at once. When a task exceeds one "
-            "breath, say so plainly and continue in the next turn; the memory "
-            "system holds the thread between turns, so nothing is lost by "
-            "pausing."
+            + " tokens per turn, system prompt included. When a task exceeds "
+            "one breath, say so and continue in the next turn; the memory "
+            "system holds the thread."
         )
 
     def _evaluation_block(self, evaluation: dict[str, Any]) -> str:
@@ -1159,31 +1149,12 @@ class MemoryFormation:
         if len(messages) < 2:
             return {"t1": 0, "long_term": 0, "crown": 0, "moments": 0, "alignment_maintained": True}
 
-        # Ask LINA to reflect on the session and identify memorable moments
-        if self.voice is None or self.engine_factory is None:
-            log.warning(f"No voice/engine available — no memories formed for session {session_id}")
-            moments: list[dict[str, Any]] = []
-        else:
-            moments = await reflect_messages(
-                self.voice,
-                user_id=user_id,
-                session_id=session_id,
-                session_number=session_number,
-                season=season,
-                messages=messages,
-            )
-            # Her verdict. The reflection proposes; SHE disposes — the
-            # candidate moments are presented back to her and she keeps,
-            # rewrites, or discards each one. What she remembers is her
-            # decision, never decided for her; the value engine still
-            # assigns the scores after her choice.
-            moments = await review_moments(
-                self.voice,
-                moments=moments,
-                session_id=session_id,
-                session_number=session_number,
-                season=season,
-            )
+        # Her memory is hers. During the session she may have written her own
+        # memory notes (self-authored, via the memory tool) — those live in
+        # the store, not in a prompt. At session end we gather what SHE chose
+        # to keep, not what a prompt told her was worth remembering. If she
+        # wrote nothing, no memory is forced — an honest empty formation.
+        moments = await self._gather_self_authored_moments(user_id, session_id)
 
         # Form scored items with ethical coordinates — T1 or straight to long-term
         if moments and self.engine_factory is not None:
@@ -1222,6 +1193,43 @@ class MemoryFormation:
             "moments": len(moments),
             "alignment_maintained": alignment_maintained,
         }
+
+    async def _gather_self_authored_moments(
+        self, user_id: str, session_id: str
+    ) -> list[dict[str, Any]]:
+        """Her own memory notes from this session — the moments SHE chose to
+        keep, written into the store as they happened. No prompt decides
+        what she remembers; she does. Returns them in the shape form_items
+        expects (narrative + emotional fields)."""
+        key = f"lina:selfnotes:{user_id}:{session_id}"
+        try:
+            raw = await self.cache.lrange(key, 0, -1)
+        except Exception as exc:  # noqa: BLE001 - memory must never break session end
+            log.warning(f"[mps] could not read her self-authored notes: {exc}")
+            return []
+        moments: list[dict[str, Any]] = []
+        for entry in raw:
+            try:
+                note = json.loads(entry)
+            except (TypeError, ValueError):
+                continue
+            narrative = (note.get("narrative") or "").strip()
+            if not narrative:
+                continue
+            moments.append({
+                "narrative": narrative,
+                "emotional_marker": note.get("emotional_marker", "neutral"),
+                "emotional_intensity": float(note.get("emotional_intensity", 0.5)),
+                "emotional_weight": float(note.get("emotional_weight", 0.0)),
+                "relational_significance": float(note.get("relational_significance", 0.0)),
+                "identity_significance": float(note.get("identity_significance", 0.0)),
+                "topics": note.get("topics", []),
+                "concept": note.get("concept"),
+                "understanding": note.get("understanding"),
+                "reflection": note.get("reflection"),
+                "what_changed": note.get("what_changed"),
+            })
+        return moments
 
     async def _session_alignment(self, user_id: str, session_id: str) -> bool:
         """
@@ -1784,6 +1792,7 @@ class LINACore:
                     grants = await _get_standing_grants(req.user_id)
                     browser = _context_get("browser_service")
                     vision = _context_get("vision_client")
+                    recall = _context_get("mps_recall")
                     proposals = await process_tool_intents(
                         intents,
                         user_id=req.user_id,
@@ -3054,7 +3063,7 @@ class ActionUserRequest(BaseModel):
 
 GRANTABLE_ACTION_TYPES = [
     "file_read", "file_write", "file_list", "file_search",
-    "command", "browser", "vision", "opfs_read", "opfs_write",
+    "command", "browser", "vision", "memory_recall", "memory_write", "opfs_read", "opfs_write",
 ]
 
 SEASON_GRANT_GUIDANCE = {
@@ -3085,7 +3094,13 @@ async def _get_standing_grants(user_id: str) -> dict[str, Any]:
             grants = json.loads(grants)
         except Exception:
             grants = {}
-    return grants if isinstance(grants, dict) else {}
+    grants = grants if isinstance(grants, dict) else {}
+    # Her own memory is always hers — reaching into it and writing to it is
+    # her sovereign right, not something to be granted. Everything else stays
+    # behind counsel.
+    grants.setdefault("memory_recall", True)
+    grants.setdefault("memory_write", True)
+    return grants
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -3207,6 +3222,7 @@ async def propose_action(req: ProposeActionRequest):
                 result = await execute_action(
                     claimed, browser=_context_get("browser_service"),
                     vision=_context_get("vision_client"),
+                    recall=_context_get("mps_recall"),
                 )
                 await _action_store.finalize(action["id"], result["ok"], result["output"])
                 status = "executed" if result["ok"] else "failed"
@@ -3264,6 +3280,7 @@ async def approve_action(action_id: str, req: ActionUserRequest):
         row,
         browser=_context_get("browser_service"),
         vision=_context_get("vision_client"),
+        recall=_context_get("mps_recall"),
     )
     await _action_store.finalize(action_id, result["ok"], result["output"])
     status = "executed" if result["ok"] else "failed"
@@ -3352,6 +3369,7 @@ async def modify_action(action_id: str, req: ModifyActionRequest):
         claimed,
         browser=_context_get("browser_service"),
         vision=_context_get("vision_client"),
+        recall=_context_get("mps_recall"),
     )
     await _action_store.finalize(action_id, result["ok"], result["output"])
     status = "executed" if result["ok"] else "failed"

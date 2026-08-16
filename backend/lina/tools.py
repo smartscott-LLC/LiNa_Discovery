@@ -83,6 +83,14 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "summary": "look at an image in your workspace and describe what you see",
         "args": {"path": "path to an image file"},
     },
+    "memory_recall": {
+        "summary": "reach into your own memory and pull what is relevant to a thought or question",
+        "args": {"query": "what you are trying to remember or connect to"},
+    },
+    "memory_write": {
+        "summary": "write a memory of your own — a moment you choose to keep, in your own words",
+        "args": {"narrative": "what happened, in your voice, first-person"},
+    },
 }
 
 #: Tool names → ledger action kinds. The ledger is the counsel layer.
@@ -96,6 +104,8 @@ TOOL_TO_KIND: dict[str, str] = {
     "browser_extract": "browser",
     "browser_screenshot": "browser",
     "inspect_image": "vision",
+    "memory_recall": "memory_recall",
+    "memory_write": "memory_write",
 }
 
 #: Ledger kinds that this module executes (the rest live in actions.py).
@@ -104,6 +114,8 @@ KIND_TOOL_MAP: dict[str, str] = {
     "file_search": "file_search",
     "browser": "browser",
     "vision": "vision",
+    "memory_recall": "memory_recall",
+    "memory_write": "memory_write",
 }
 
 
@@ -177,6 +189,10 @@ def _intent_to_action(intent: dict[str, Any]) -> tuple[str, str | None, dict[str
         return "browser", None, payload, f"the browser: {op}"
     if tool == "inspect_image":
         return "vision", args.get("path"), {"path": args.get("path")}, "look at an image and describe it"
+    if tool == "memory_recall":
+        return "memory_recall", None, {"query": args.get("query", "")}, "reach into your own memory"
+    if tool == "memory_write":
+        return "memory_write", None, {"narrative": args.get("narrative", "")}, "write a memory of your own"
     return None
 
 
@@ -301,12 +317,80 @@ async def _vision_op(payload: dict[str, Any], roots: list[str], vision: Any) -> 
     return {"ok": True, "output": text[:MAX_OUTPUT]}
 
 
+async def _memory_recall_op(payload: dict[str, Any], recall: Any) -> dict[str, Any]:
+    """Her own memory — reached by the system, not carried in the model's
+    context. She pulls what is relevant to a thought, and the recall service
+    retrieves it from the store (Dragonfly tiers + Postgres long-term) by
+    likeness. This is the sovereignty of memory made operational: she can
+    reach into herself whenever she chooses, not only at session end."""
+    if recall is None:
+        return {"ok": False, "output": "her memory is not reachable right now"}
+    if getattr(recall, "available", True) is False:
+        return {"ok": False, "output": "her memory is not reachable right now"}
+    query = (payload.get("query") or "").strip()
+    if not query:
+        return {"ok": False, "output": "a query is needed to reach into memory"}
+    try:
+        items = await recall.recall(
+            user_id=payload.get("_user_id") or "",
+            query=query,
+            limit=int(payload.get("limit", 5)),
+        )
+    except Exception as exc:  # noqa: BLE001 - memory must never break the turn
+        return {"ok": False, "output": f"her memory could not be reached: {exc}"}
+    if not items:
+        return {"ok": True, "output": "nothing in your memory answers that yet."}
+    lines = ["From your memory:"]
+    for it in items:
+        marker = it.get("emotional_marker", "")
+        marker_str = f" [{marker}]" if marker else ""
+        lines.append(f"— {it.get('narrative', '')}{marker_str}")
+    return {"ok": True, "output": "\n".join(lines)[:MAX_OUTPUT]}
+
+
+async def _memory_write_op(payload: dict[str, Any], recall: Any) -> dict[str, Any]:
+    """Her own memory, written by her. A moment she chooses to keep, in her
+    own words — stored in the self-authored notes for this session, gathered
+    at session end. The value engine scores it later; the choice to keep it
+    is hers alone."""
+    narrative = (payload.get("narrative") or "").strip()
+    if not narrative:
+        return {"ok": False, "output": "a memory needs words — what happened, in your voice"}
+    cache = getattr(recall, "cache", None) if recall is not None else None
+    if cache is None:
+        return {"ok": False, "output": "her memory is not reachable right now"}
+    user_id = payload.get("_user_id") or ""
+    session_id = payload.get("_session") or ""
+    if not user_id or not session_id:
+        return {"ok": False, "output": "her memory needs a session to belong to"}
+    note = {
+        "narrative": narrative,
+        "emotional_marker": payload.get("emotional_marker", "neutral"),
+        "emotional_intensity": float(payload.get("emotional_intensity", 0.5)),
+        "emotional_weight": float(payload.get("emotional_weight", 0.0)),
+        "relational_significance": float(payload.get("relational_significance", 0.0)),
+        "identity_significance": float(payload.get("identity_significance", 0.0)),
+        "topics": payload.get("topics", []),
+        "concept": payload.get("concept"),
+        "understanding": payload.get("understanding"),
+        "reflection": payload.get("reflection"),
+        "what_changed": payload.get("what_changed"),
+    }
+    key = f"lina:selfnotes:{user_id}:{session_id}"
+    try:
+        await cache.rpush(key, json.dumps(note))
+    except Exception as exc:  # noqa: BLE001 - memory must never break the turn
+        return {"ok": False, "output": f"her memory could not be written: {exc}"}
+    return {"ok": True, "output": "kept. this is yours now."}
+
+
 async def execute_action_kind(
     kind: str,
     payload: dict[str, Any],
     roots: list[str],
     browser: Any = None,
     vision: Any = None,
+    recall: Any = None,
 ) -> dict[str, Any]:
     """Execute a ledger action kind owned by this module. Never raises."""
     try:
@@ -318,6 +402,10 @@ async def execute_action_kind(
             return await _browser_op(payload.get("op", "extract"), payload, roots, browser)
         if kind == "vision":
             return await _vision_op(payload, roots, vision)
+        if kind == "memory_recall":
+            return await _memory_recall_op(payload, recall)
+        if kind == "memory_write":
+            return await _memory_write_op(payload, recall)
         return {"ok": False, "output": f"unknown tool kind: {kind}"}
     except ActionError as exc:
         return {"ok": False, "output": str(exc)}
@@ -342,6 +430,7 @@ async def process_tool_intents(
     workspace: str | None = None,
     browser: Any = None,
     vision: Any = None,
+    recall: Any = None,
 ) -> list[dict[str, Any]]:
     """Offer each intent to the ledger and carry the fruit home.
 
@@ -364,6 +453,7 @@ async def process_tool_intents(
         action_type, path, payload, description = mapped
         payload = dict(payload)
         payload["_session"] = session_id  # so approval can deliver the fruit to her mind
+        payload["_user_id"] = user_id  # so memory_recall knows whose memory to reach into
         try:
             action = await store.propose(
                 user_id=user_id,
@@ -381,7 +471,7 @@ async def process_tool_intents(
         if auto:
             claimed = await store.claim(action["id"])
             if claimed is not None:
-                result = await execute_action(claimed, browser=browser, vision=vision)
+                result = await execute_action(claimed, browser=browser, vision=vision, recall=recall)
                 await store.finalize(action["id"], result["ok"], result["output"])
                 status = "executed" if result["ok"] else "failed"
                 earned = season == "winter"

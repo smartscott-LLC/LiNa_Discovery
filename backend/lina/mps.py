@@ -1254,6 +1254,12 @@ class MemoryRecallService(Service):
         self.cache_provider = cache_provider
         self.embedder = embedder or EmbeddingClient()
 
+    @property
+    def cache(self) -> Any:
+        """The working-memory cache (Dragonfly) — so her memory tools can
+        reach the store directly."""
+        return self.cache_provider() if self.cache_provider else None
+
     async def start(self) -> None:
         self.context["mps_recall"] = self
         if self.embedder.available:

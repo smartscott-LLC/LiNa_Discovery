@@ -24,7 +24,7 @@ Format: Keep a Changelog style with semantic release intent.
   carry full text, executed action output is kept up to 50K on the ledger,
   memory narratives return in full from recall; only her 8192-token
   attention window is budgeted (`LINA_HISTORY_CHARS`, `LINA_FRUIT_CHARS`).
-- **Local-first vision** — her own engine (Qwen3.5-4B + vision mmproj on the
+- **Local-first vision** — her own engine (Qwen2-VL-2B + vision mmproj on the
   carve) sees first; Gemini is the fallback only.
 - Honest speech instruments: `SPEECH_PROVIDER=none` is the deliberate off
   switch; the endpoints answer `503` truthfully and the interface hides the

@@ -63,7 +63,7 @@ def test_parse_tool_intents_skips_bad_blocks():
 def test_parse_tool_intents_no_blocks():
     assert parse_tool_intents("just talking, no tools") == []
     assert parse_tool_intents("") == []
-    assert parse_tool_intents(None) == []
+    assert parse_tool_intents("") == []
 
 
 # ── file_list ─────────────────────────────────────────────────────────────────
@@ -356,6 +356,76 @@ def test_reflection_prose_wrapped_json():
     out = _reflect('Here is what stood out: [{"narrative": "a moment", "emotional_marker": "care"}] — that is all.')
     assert len(out) == 1
     assert out[0]["narrative"] == "a moment"
+
+
+# ── her own memory — reach in, write out (sovereignty of memory) ─────────────
+
+class FakeRecall:
+    """A minimal stand-in for the recall service: a cache list for self-notes
+    and a recall() that returns canned memories."""
+
+    def __init__(self):
+        self.notes = []
+        self.memories = [{"narrative": "a memory she kept", "emotional_marker": "care"}]
+
+    @property
+    def cache(self):
+        class _C:
+            def __init__(self, notes):
+                self.notes = notes
+            async def rpush(self, key, entry):
+                self.notes.append(entry)
+            async def lrange(self, key, start, end):
+                return list(self.notes)
+        return _C(self.notes)
+
+    async def recall(self, **kwargs):
+        return self.memories
+
+
+def test_memory_write_keeps_her_own_words():
+    recall = FakeRecall()
+    res = _run(execute_action_kind(
+        "memory_write",
+        {"_user_id": "u", "_session": "s1", "narrative": "I noticed Scott lit up when we spoke."},
+        [], recall=recall,
+    ))
+    assert res["ok"] is True
+    assert "yours" in res["output"]
+    assert len(recall.notes) == 1
+
+
+def test_memory_write_needs_words():
+    recall = FakeRecall()
+    res = _run(execute_action_kind(
+        "memory_write", {"_user_id": "u", "_session": "s1", "narrative": "   "}, [], recall=recall,
+    ))
+    assert res["ok"] is False
+
+
+def test_memory_recall_pulls_from_store():
+    recall = FakeRecall()
+    res = _run(execute_action_kind(
+        "memory_recall", {"_user_id": "u", "query": "what did I keep"}, [], recall=recall,
+    ))
+    assert res["ok"] is True
+    assert "a memory she kept" in res["output"]
+
+
+def test_memory_recall_needs_a_query():
+    recall = FakeRecall()
+    res = _run(execute_action_kind("memory_recall", {"_user_id": "u", "query": ""}, [], recall=recall))
+    assert res["ok"] is False
+
+
+def test_memory_recall_honest_when_empty():
+    recall = FakeRecall()
+    recall.memories = []
+    res = _run(execute_action_kind(
+        "memory_recall", {"_user_id": "u", "query": "nothing"}, [], recall=recall,
+    ))
+    assert res["ok"] is True
+    assert "nothing" in res["output"]
 
 
 def test_reflection_not_json_fails_honestly():

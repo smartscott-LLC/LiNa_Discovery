@@ -116,12 +116,14 @@ async def execute_action(
     row: dict[str, Any],
     browser: Any = None,
     vision: Any = None,
+    recall: Any = None,
 ) -> dict[str, Any]:
     """Execute an approved action row. Returns {"ok", "output"} — never raises.
 
-    ``browser`` is the BrowserService (her eyes) and ``vision`` her image
-    sight (VisionClient) when they are in the loop; the kinds that need
-    them take them, the rest never touch them.
+    ``browser`` is the BrowserService (her eyes), ``vision`` her image
+    sight (VisionClient), and ``recall`` her memory (MemoryRecallService)
+    when they are in the loop; the kinds that need them take them, the
+    rest never touch them.
     """
     kind = row.get("action_type", "")
     payload = row.get("payload") or {}
@@ -167,9 +169,9 @@ async def execute_action(
             text = (out or b"").decode(errors="replace")
             return {"ok": proc.returncode == 0, "output": text[:MAX_OUTPUT]}
 
-        if kind in ("file_list", "file_search", "browser", "vision"):
+        if kind in ("file_list", "file_search", "browser", "vision", "memory_recall", "memory_write"):
             from tools import execute_action_kind  # lazy: tools imports actions
-            return await execute_action_kind(kind, payload, roots, browser=browser, vision=vision)
+            return await execute_action_kind(kind, payload, roots, browser=browser, vision=vision, recall=recall)
 
         if kind == "tool":
             return {
