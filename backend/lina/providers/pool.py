@@ -14,24 +14,27 @@ from typing import Any, Callable
 
 from .base import AIProvider, ProviderError, VoicePoolError
 from .huggingface import HuggingFaceProvider
+from .local_direct import LocalDirectProvider
 from .openai_compat import OpenAICompatProvider
 from .siliconflow import SiliconFlowProvider
 
 log = logging.getLogger("lina.voice")
 
 
-class LocalVoiceProvider(OpenAICompatProvider):
-    """Her voice on her own machine — the engine as an instrument.
+class LocalLegacyProvider(OpenAICompatProvider):
+    """Legacy HTTP-based local provider (llama.cpp server).
 
     Reads ``LOCAL_VOICE_URL`` / ``LOCAL_VOICE_MODEL`` / ``LOCAL_VOICE_API_KEY``
-    (the key is a local dummy — the engine does not authenticate; the field
-    is kept because the contract requires it). The local instrument speaks
-    directly: ``enable_thinking=false`` keeps her words immediate — she is
-    an instruction follower; the polytope does the thinking.
+    and talks to a llama.cpp HTTP server. Kept for the transition — the new
+    ``LocalDirectProvider`` uses ctypes directly (no HTTP server).
+
+    .. deprecated::
+        Use ``LocalDirectProvider`` instead. This will be removed when the
+        transition is complete.
     """
 
-    name = "local"
-    label = "Local (this machine)"
+    name = "local_legacy"
+    label = "Local (HTTP server, legacy)"
 
     def __init__(
         self,
@@ -52,9 +55,9 @@ class LocalVoiceProvider(OpenAICompatProvider):
 
 #: Well-known providers and their environment key names.
 PROVIDER_BUILDERS: dict[str, type[AIProvider]] = {
+    "local": LocalDirectProvider,
     "siliconflow": SiliconFlowProvider,
     "huggingface": HuggingFaceProvider,
-    "local": LocalVoiceProvider,
 }
 
 

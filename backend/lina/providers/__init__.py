@@ -8,10 +8,12 @@ endpoint can be added via `openai_compat`.
 """
 
 from .base import AIProvider, ProviderError, VoicePoolError
+from .local_direct import LocalDirectProvider
 from .pool import VoicePool, build_voice_pool_from_env
 
 __all__ = [
     "AIProvider",
+    "LocalDirectProvider",
     "ProviderError",
     "VoicePoolError",
     "VoicePool",

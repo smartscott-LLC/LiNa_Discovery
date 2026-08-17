@@ -114,7 +114,7 @@ def test_factory_env_chain():
         pool = build_voice_pool_from_env(primary="siliconflow", max_concurrent=3)
         # siliconflow + huggingface have keys; local is always
         # available — her voice lives on her own machine now.
-        assert pool.names == ["siliconflow", "huggingface", "local"], pool.names
+        assert pool.names == ["siliconflow", "local", "huggingface"], pool.names
         assert pool.max_concurrent == 3
     asyncio.run(run())
 

@@ -106,8 +106,29 @@ std::vector<MemoryItemRow> InMemoryMemoryStore::fetch_by_status(const std::strin
 }
 
 void InMemoryMemoryStore::update_item(const MemoryItemRow& row) {
+    // Check long-term store first
     auto it = long_term_.find(row.item_id);
-    if (it == long_term_.end()) return;
+    if (it == long_term_.end()) {
+        // Also check tiers
+        for (auto& [tier, items] : tiers_) {
+            auto tit = items.find(row.item_id);
+            if (tit != items.end()) {
+                auto& item = tit->second;
+                item.importance_score = row.importance_score;
+                item.status = row.status;
+                item.reference_count = row.reference_count;
+                item.last_referenced_at = row.last_referenced_at;
+                item.decay_started_at = row.decay_started_at;
+                item.concept_name = row.concept_name;
+                item.understanding = row.understanding;
+                item.floor = row.floor;
+                item.protected_flag = row.protected_flag;
+                item.must_keep = row.must_keep;
+                return;
+            }
+        }
+        return;
+    }
 
     auto& item = it->second;
     item.importance_score = row.importance_score;
@@ -115,6 +136,17 @@ void InMemoryMemoryStore::update_item(const MemoryItemRow& row) {
     item.reference_count = row.reference_count;
     item.last_referenced_at = row.last_referenced_at;
     item.decay_started_at = row.decay_started_at;
+
+    // Full post-review update: Lina can add concept, understanding,
+    // floor, and protection when she reviews a memory.
+    if (row.concept_name.has_value() && !row.concept_name->empty())
+        item.concept_name = row.concept_name;
+    if (row.understanding.has_value() && !row.understanding->empty())
+        item.understanding = row.understanding;
+    if (row.floor.has_value())
+        item.floor = row.floor;
+    item.protected_flag = row.protected_flag;
+    item.must_keep = row.must_keep;
 }
 
 void InMemoryMemoryStore::delete_item(const std::string& item_id) {
