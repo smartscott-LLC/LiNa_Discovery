@@ -5,7 +5,7 @@ Requires=mnt-huge.mount
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /home/server/LiNa_Discovery/scripts/dragoncache_carve.py --size 1G --page 2M --weights /home/server/models/lina-local/Qwen2-VL-2B-Instruct-Q6_K.gguf
+ExecStart=/usr/bin/python3 /home/server/LiNa_Discovery/scripts/dragoncache_carve.py
 RemainAfterExit=yes
 
 [Install]
